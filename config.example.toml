@@ -1,0 +1,21 @@
+# ~/.config/feedback-hub/config.toml — used by the CLI and `feedback-hub worker`.
+url = "https://feedback.fruitiex.org"
+token_file = "~/.config/feedback-hub/token"   # or: token = "..."
+
+[worker]
+# name = "honeydew"              # defaults to the hostname
+default_agent = "claude"         # used when an item was queued without an agent
+# agents = ["claude", "codex"]   # agents this machine runs (default: all configured)
+poll_seconds = 30
+max_runtime_minutes = 90
+worktree_root = "~/worktrees"    # worktrees go to <root>/<repo>/feedback-<id>
+delivery = "push"                # push | branch | pr
+include_open = false             # true = also start agents on new, un-queued feedback
+
+# Override or add agents. Placeholders: {prompt} {prompt_file} {workdir} {id} {app}
+# [agents.claude]
+# command = ["claude", "-p", "--permission-mode", "bypassPermissions", "{prompt}"]
+
+# App id → local checkout, when it isn't ~/<app id> or the registry's `checkout`.
+[repos]
+# ferrotune-android = "~/ferrotune"
