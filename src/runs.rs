@@ -57,6 +57,10 @@ CREATE TABLE IF NOT EXISTS run_commands (
     delivered_at TEXT
 );
 CREATE INDEX IF NOT EXISTS run_commands_run ON run_commands(run_id, id);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ";
 
 /// Items queued before runs existed get a run so the worker still picks them up.
@@ -202,6 +206,16 @@ pub struct WorkerStatus {
     pub last_seen: String,
 }
 
+/// The agent, model and effort the owner last queued with; the default next time.
+pub const LAST_CHOICE: &str = "last_agent_choice";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentChoice {
+    pub agent: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
 pub struct NewRun {
     pub agent: String,
     pub model: Option<String>,
@@ -296,6 +310,24 @@ fn describe(agent: &str, model: Option<&str>, effort: Option<&str>) -> String {
 }
 
 impl Database {
+    pub fn setting<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        let value: Option<String> = self
+            .conn()
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(value.and_then(|v| serde_json::from_str(&v).ok()))
+    }
+
+    pub fn set_setting<T: Serialize>(&self, key: &str, value: &T) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, serde_json::to_string(value)?],
+        )?;
+        Ok(())
+    }
+
     /// Queues a new run. Returns `Err(run id)` when the item already has an active run.
     pub fn create_run(
         &self,

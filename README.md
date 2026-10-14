@@ -107,6 +107,14 @@ if it can't proceed). The UI's instructions field is added to that prompt.
 | `codex` | `codex exec --json` / `codex exec resume <session>` | after the current turn, or interrupt + resume |
 | `hermes` | `hermes chat --format stream-json` / `--resume <session>` | after the current turn, or interrupt + resume |
 
+The agent, model and effort last queued from the UI are stored on the hub and
+preselected next time, on every device. Signing in to the triage UI also sets
+an HttpOnly owner cookie (derived from the admin token) on the hub; the widget
+on the owner's apps (same site, e.g. `*.fruitiex.org`) asks
+`/api/widget/session` with it and then offers **Send & fix**, which submits
+the feedback and queues it for that last-used agent in one go. Other widget
+users never see it, and the hub ignores `dispatch` without the cookie.
+
 A message to a finished run requeues it on the same worker and resumes the
 agent session there. Claude Code is only ever driven through the official
 `claude` CLI with the local login (no API calls, no token reuse), so it works

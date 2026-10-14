@@ -199,6 +199,8 @@ class Widget {
   private busy = false;
   /** Set by "Page snapshot": the next button press captures instead of opening. */
   private armed = false;
+  /** Whether the hub's owner is using the widget (they get "Send & fix"). */
+  private ownerSession: Promise<OwnerSession> | null = null;
 
   constructor(
     private hub: string,
@@ -407,7 +409,10 @@ class Widget {
         </label>
         <footer>
           <button type="button" class="link hide-tab">Hide button for this session</button>
-          <button type="submit" class="primary">Send</button>
+          <span class="send">
+            <button type="button" class="secondary dispatch" hidden>Send &amp; fix</button>
+            <button type="submit" class="primary">Send</button>
+          </span>
         </footer>
       </form>`;
     this.root.append(dialog);
@@ -473,7 +478,17 @@ class Widget {
     });
     form.addEventListener('submit', (event) => {
       event.preventDefault();
-      void this.submit(form, status);
+      void this.submit(form, status, false);
+    });
+    const dispatch = form.querySelector<HTMLButtonElement>('.dispatch')!;
+    dispatch.addEventListener('click', () => void this.submit(form, status, true));
+    void this.owner().then((session) => {
+      if (!session.owner || !session.choice) return;
+      const { agent, model, effort } = session.choice;
+      const what = [agent, model, effort].filter(Boolean).join(' · ');
+      dispatch.hidden = false;
+      dispatch.title = `Send and let ${what} work on it right away`;
+      dispatch.textContent = `Send & fix · ${what}`;
     });
 
     this.renderShots();
@@ -536,13 +551,21 @@ class Widget {
     void annotator.open();
   }
 
-  private async submit(form: HTMLFormElement, status: HTMLElement) {
-    const button = form.querySelector<HTMLButtonElement>('button[type=submit]')!;
+  /** Asks the hub (with its cookie; same site) whether the owner is signed in there. */
+  private owner(): Promise<OwnerSession> {
+    this.ownerSession ??= fetch(`${this.hub}/api/widget/session`, { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : { owner: false }))
+      .catch(() => ({ owner: false }));
+    return this.ownerSession;
+  }
+
+  private async submit(form: HTMLFormElement, status: HTMLElement, dispatch: boolean) {
+    const buttons = [...form.querySelectorAll<HTMLButtonElement>('footer .send button')];
     if (!this.message.trim() && this.shots.length === 0) {
       status.textContent = 'Add a short description or a screenshot.';
       return;
     }
-    button.disabled = true;
+    for (const b of buttons) b.disabled = true;
     status.textContent = 'Sending…';
     const diagnostics = this.includeDiagnostics;
     const context: Record<string, unknown> = { ...this.extraContext };
@@ -563,8 +586,9 @@ class Widget {
       const response = await fetch(`${this.hub}/api/feedback`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        credentials: 'omit',
+        credentials: dispatch ? 'include' : 'omit',
         body: JSON.stringify({
+          dispatch,
           app: this.app,
           kind: this.kind,
           message: this.message.trim(),
@@ -581,13 +605,23 @@ class Widget {
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
       this.close(true);
-      const done = this.toast(`Thanks! Feedback #${body.id} was sent.`);
-      setTimeout(done, 3500);
+      const text = !dispatch
+        ? `Thanks! Feedback #${body.id} was sent.`
+        : body.dispatched
+          ? `#${body.id} sent to ${body.run.agent} (run ${body.run.id}).`
+          : `#${body.id} was saved, but no agent was started; sign in to the hub again.`;
+      const done = this.toast(text);
+      setTimeout(done, 4500);
     } catch (error) {
       status.textContent = `Sending failed: ${describe(error)}. Your text is kept; try again.`;
-      button.disabled = false;
+      for (const b of buttons) b.disabled = false;
     }
   }
+}
+
+interface OwnerSession {
+  owner: boolean;
+  choice?: { agent: string; model: string | null; effort: string | null };
 }
 
 function escapeHtml(text: string) {

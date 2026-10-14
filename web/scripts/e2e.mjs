@@ -23,7 +23,7 @@ const server = spawn(bin, ['serve'], {
     FEEDBACK_HUB_DATA_DIR: dataDir,
     FEEDBACK_HUB_STATIC_DIR: resolve('dist'),
     FEEDBACK_HUB_ADMIN_TOKEN: token,
-    FEEDBACK_HUB_ALLOWED_ORIGINS: 'http://localhost:*',
+    FEEDBACK_HUB_ALLOWED_ORIGINS: 'http://localhost:*,http://127.0.0.1:*',
   },
   stdio: 'inherit',
 });
@@ -243,7 +243,34 @@ try {
   await triage.click('.back');
   await triage.screenshot({ path: `${out}/triage-mobile.png`, fullPage: true });
   if (uiErrors.length) fail(`triage UI errors: ${uiErrors.join('\n')}`);
+
+  // Signed in to the hub, the owner gets "Send & fix" in the widget of an app on
+  // the same site, using the last agent choice (the bulk send above).
+  const appTab = await context.newPage();
+  await appTab.setViewportSize({ width: 1280, height: 800 });
+  await appTab.goto(`http://127.0.0.1:${appPort}/`);
+  await appTab.locator('feedback-hub-widget .fab').click();
+  const dispatch = appTab.locator('feedback-hub-widget .dispatch');
+  await dispatch.waitFor({ state: 'visible' });
+  if (!(await dispatch.textContent()).includes('claude · opus · high')) fail(`unexpected dispatch label: ${await dispatch.textContent()}`);
+  await appTab.locator('feedback-hub-widget textarea').fill('Header overlaps the menu');
+  await appTab.screenshot({ path: `${out}/widget-owner.png` });
+  await dispatch.click();
+  await appTab.locator('feedback-hub-widget .toast', { hasText: 'sent to claude' }).waitFor({ timeout: 15000 });
+  const owned = await (await fetch(`${hub}/api/runs?active=true`, { headers: auth })).json();
+  if (!owned.some((r) => r.requested_by === 'widget' && r.model === 'opus' && r.title === 'Header overlaps the menu')) {
+    fail(`widget dispatch did not create a run: ${JSON.stringify(owned)}`);
+  }
   await context.close();
+
+  // Anyone else sees only "Send".
+  const stranger = await browser.newPage();
+  await stranger.goto(`http://127.0.0.1:${appPort}/`);
+  await stranger.locator('feedback-hub-widget .fab').click();
+  await stranger.locator('feedback-hub-widget textarea').waitFor();
+  await stranger.waitForTimeout(500);
+  if (await stranger.locator('feedback-hub-widget .dispatch').isVisible()) fail('stranger was offered Send & fix');
+  await stranger.close();
   console.log('e2e ok');
 } finally {
   await browser?.close();

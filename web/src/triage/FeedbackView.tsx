@@ -15,8 +15,8 @@ import {
   X,
 } from 'lucide-react';
 import { Checkbox, Collapsible, Dialog, DropdownMenu, ToggleGroup } from 'radix-ui';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AgentPicker, choiceLabel, useAgentChoice } from './AgentPicker';
+import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { AgentPicker, ChoiceContext, choiceLabel, useAgentChoice } from './AgentPicker';
 import { ago, api, patch, post, screenshotUrl } from './api';
 import { ACTIVE_RUN, AgentChoice, AppInfo, Detail, Feedback, KINDS, Run, STATUSES } from './types';
 import { AutoTextarea, Confirm, Select, StatusPill, submitShortcut, useAction, usePoll, useToast } from './ui';
@@ -198,6 +198,7 @@ export function FeedbackView({
 
 function BulkBar({ ids, onClear, onDone }: { ids: number[]; onClear: () => void; onDone: () => void }) {
   const [choice, setChoice] = useAgentChoice();
+  const { remember } = useContext(ChoiceContext);
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const toast = useToast();
@@ -216,6 +217,7 @@ function BulkBar({ ids, onClear, onDone }: { ids: number[]; onClear: () => void;
         tone: result.created.length ? 'ok' : 'error',
       });
       setNote('');
+      remember(choice);
       onDone();
     });
     setBusy(false);
@@ -397,6 +399,7 @@ function FeedbackDetail({
 
 function AgentCard({ detail: d, onChanged, onOpenRun }: { detail: Detail; onChanged: () => void; onOpenRun: (id: number) => void }) {
   const [choice, setChoice] = useAgentChoice();
+  const { remember } = useContext(ChoiceContext);
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const run = useAction();
@@ -443,6 +446,7 @@ function AgentCard({ detail: d, onChanged, onOpenRun }: { detail: Detail; onChan
     setBusy(false);
     if (ok) {
       setNote('');
+      remember(choice);
       onChanged();
     }
   };

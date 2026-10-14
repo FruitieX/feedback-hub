@@ -366,6 +366,7 @@ dependencies = [
  "chrono",
  "clap",
  "http-body-util",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

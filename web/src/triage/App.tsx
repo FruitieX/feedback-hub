@@ -1,11 +1,11 @@
 import { Bot, LogOut, MessageSquare } from 'lucide-react';
 import { Tabs, Tooltip } from 'radix-ui';
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { WorkersContext, WorkersState } from './AgentPicker';
+import { ChoiceContext, WorkersContext, WorkersState } from './AgentPicker';
 import { AgentsView } from './AgentsView';
 import { api, getToken, onTokenChange, post, setToken } from './api';
 import { FeedbackView } from './FeedbackView';
-import { AppInfo, Run, WorkerStatus } from './types';
+import { AgentChoice, AppInfo, Run, WorkerStatus } from './types';
 import { ToastProvider, usePoll } from './ui';
 
 type View = 'feedback' | 'agents';
@@ -80,6 +80,8 @@ function Login() {
 
 function Signed() {
   const [route, setRoute] = useState<Route>(readRoute);
+  const [lastChoice, setLastChoice] = useState<AgentChoice | null>(null);
+  const choice = useMemo(() => ({ last: lastChoice, remember: setLastChoice }), [lastChoice]);
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [workers, setWorkers] = useState<WorkerStatus[]>([]);
   const [running, setRunning] = useState(0);
@@ -93,6 +95,9 @@ function Signed() {
       .then((r) => r.json())
       .then(setApps)
       .catch(() => setApps([]));
+    api<AgentChoice>('/api/agent-choice').then(setLastChoice, () => {});
+    // Lets the widget on the owner's apps recognise them and offer "send & fix".
+    void post('/api/session', {}).catch(() => {});
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
@@ -140,6 +145,7 @@ function Signed() {
 
   return (
     <WorkersContext.Provider value={workersState}>
+      <ChoiceContext.Provider value={choice}>
       <div className="shell">
         <header className="top">
           <h1>
@@ -157,7 +163,13 @@ function Signed() {
             </Tabs.List>
           </Tabs.Root>
           <div className="spacer" />
-          <button className="button ghost" onClick={() => setToken('')} data-logout>
+          <button
+            className="button ghost"
+            onClick={() => {
+              void fetch('/api/session', { method: 'DELETE' }).finally(() => setToken(''));
+            }}
+            data-logout
+          >
             <LogOut size={15} /> <span className="hide-mobile">Sign out</span>
           </button>
         </header>
@@ -176,6 +188,7 @@ function Signed() {
           />
         )}
       </div>
+      </ChoiceContext.Provider>
     </WorkersContext.Provider>
   );
 }

@@ -7,7 +7,7 @@ use crate::{
         Database, Event, Feedback, FeedbackEdit, ListFilter, NewFeedback, NewScreenshot, STATUSES,
         Screenshot,
     },
-    runs::{NewRun, Run, RunEvent, RunFilter, RunUpdate, WorkerStatus},
+    runs::{AgentChoice, LAST_CHOICE, NewRun, Run, RunEvent, RunFilter, RunUpdate, WorkerStatus},
 };
 use axum::{
     Json, Router,
@@ -173,11 +173,15 @@ pub fn app(server: Server) -> Router {
         }))
         .allow_methods([Method::GET, Method::POST])
         .allow_headers([header::CONTENT_TYPE])
-        .allow_private_network(true);
+        .allow_private_network(true)
+        // The widget sends the owner's session cookie when dispatching agents.
+        .allow_credentials(true);
 
     let public = Router::new()
         .route("/api/feedback", post(submit))
         .route("/api/apps", get(list_apps))
+        .route("/api/widget/session", get(widget_session))
+        .route("/api/session", axum::routing::delete(end_session))
         .layer(DefaultBodyLimit::max(
             MAX_SCREENSHOTS * MAX_SCREENSHOT_BYTES * 4 / 3 + 1024 * 1024,
         ));
@@ -191,6 +195,8 @@ pub fn app(server: Server) -> Router {
         .route("/api/feedback/{id}/screenshots/{idx}", get(screenshot))
         .route("/api/feedback/{id}/events", post(comment))
         .route("/api/feedback/{id}/queue", post(queue))
+        .route("/api/session", post(start_session))
+        .route("/api/agent-choice", get(agent_choice))
         .route("/api/runs", get(list_runs).post(create_runs))
         .route("/api/runs/{id}", get(run_detail).patch(update_run))
         .route(
@@ -289,6 +295,9 @@ struct Submission {
     source: Option<String>,
     #[serde(default)]
     context: serde_json::Value,
+    /// Hand the item straight to the owner's last-used agent (needs the owner's session cookie).
+    #[serde(default)]
+    dispatch: bool,
     /// Data URLs (`data:image/png;base64,...`).
     #[serde(default)]
     screenshots: Vec<String>,
@@ -400,11 +409,118 @@ async fn submit(
         context,
         screenshots,
     };
+    let dispatch = body.dispatch && is_owner(&server, &headers);
     let id = tokio::task::spawn_blocking(move || db.create(new))
         .await
         .map_err(|e| anyhow::anyhow!(e))??;
     tracing::info!(id, "feedback received");
-    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+    if !dispatch {
+        return Ok((
+            StatusCode::CREATED,
+            Json(json!({ "id": id, "dispatched": false })),
+        ));
+    }
+    let choice = last_choice(&server)?;
+    let mut new = NewRun {
+        agent: choice.agent,
+        model: choice.model,
+        effort: choice.effort,
+        note: None,
+    };
+    if server.validate_run(&new).is_err() {
+        // The remembered model is no longer offered; use the agent's defaults.
+        new.model = None;
+        new.effort = None;
+    }
+    let run = server.db.create_run(id, &new, "widget")?.ok();
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "dispatched": run.is_some(), "run": run })),
+    ))
+}
+
+const OWNER_COOKIE: &str = "fh_owner";
+
+/// The owner's session cookie value: derived from the admin token, so rotating
+/// the token signs every browser out.
+fn owner_session(token: &str) -> String {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, token.as_bytes());
+    ring::hmac::sign(&key, b"feedback-hub owner session v1")
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn is_owner(server: &Server, headers: &HeaderMap) -> bool {
+    if server.config.admin_token.is_empty() {
+        return false;
+    }
+    let expected = owner_session(&server.config.admin_token);
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|c| c.trim().split_once('='))
+        .any(|(name, value)| {
+            name == OWNER_COOKIE && constant_time_eq(value.as_bytes(), expected.as_bytes())
+        })
+}
+
+fn last_choice(server: &Server) -> Result<AgentChoice> {
+    Ok(server
+        .db
+        .setting::<AgentChoice>(LAST_CHOICE)?
+        .unwrap_or(AgentChoice {
+            agent: "claude".into(),
+            model: None,
+            effort: None,
+        }))
+}
+
+/// Called by the triage UI after sign-in: lets the widget on the owner's
+/// apps (same site) recognise the owner and offer "send & fix".
+async fn start_session(State(server): State<Server>) -> Response {
+    let cookie = format!(
+        "{OWNER_COOKIE}={}; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax",
+        owner_session(&server.config.admin_token)
+    );
+    (StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response()
+}
+
+async fn end_session() -> Response {
+    let cookie = format!("{OWNER_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax");
+    (StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response()
+}
+
+/// Tells the widget whether the owner is using it, and which agent "send & fix" uses.
+async fn widget_session(
+    State(server): State<Server>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>> {
+    if !is_owner(&server, &headers) {
+        return Ok(Json(json!({ "owner": false })));
+    }
+    Ok(Json(
+        json!({ "owner": true, "choice": last_choice(&server)? }),
+    ))
+}
+
+async fn agent_choice(State(server): State<Server>) -> Result<Json<AgentChoice>> {
+    Ok(Json(last_choice(&server)?))
+}
+
+fn remember_choice(server: &Server, run: &NewRun) -> Result<()> {
+    server.db.set_setting(
+        LAST_CHOICE,
+        &AgentChoice {
+            agent: run.agent.clone(),
+            model: run.model.clone(),
+            effort: run.effort.clone(),
+        },
+    )?;
+    Ok(())
 }
 
 async fn list_apps(State(server): State<Server>) -> Json<Vec<AppInfo>> {
@@ -618,6 +734,7 @@ async fn queue(
         .db
         .create_run(id, &new, &author(body.author.clone()))?
         .map_err(|run| conflict(format!("#{id} already has active run #{run}")))?;
+    remember_choice(&server, &new)?;
     Ok(Json(server.db.get(id)?.ok_or_else(not_found)?))
 }
 
@@ -742,6 +859,7 @@ async fn create_runs(
     }
     let new = body.run.new_run()?;
     server.validate_run(&new)?;
+    remember_choice(&server, &new)?;
     let author = author(body.run.author.clone());
     let mut created = Vec::new();
     let mut skipped = Vec::new();
@@ -1335,6 +1453,72 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "hermes must not run Claude models"
         );
+    }
+
+    #[tokio::test]
+    async fn owner_can_dispatch_from_the_widget_with_last_choice() {
+        let (router, _dir) = test_server();
+        let origin = ("origin", "https://demo.example.org");
+        let submit = json!({"app": "demo", "message": "Fix it", "dispatch": true});
+        let (status, body) =
+            send(&router, "POST", "/api/feedback", submit.clone(), &[origin]).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["dispatched"], false, "strangers can't dispatch agents");
+        let (_, session) = send(
+            &router,
+            "GET",
+            "/api/widget/session",
+            json!(null),
+            &[origin],
+        )
+        .await;
+        assert_eq!(session["owner"], false);
+
+        let res = router
+            .clone()
+            .oneshot(
+                Request::post("/api/session")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let set_cookie = res.headers()["set-cookie"].to_str().unwrap().to_string();
+        assert!(set_cookie.contains("HttpOnly") && set_cookie.contains("SameSite=Lax"));
+        let cookie = set_cookie.split(';').next().unwrap().to_string();
+        let owner = [origin, ("cookie", cookie.as_str())];
+
+        let (_, session) = send(&router, "GET", "/api/widget/session", json!(null), &owner).await;
+        assert_eq!(session["owner"], true);
+        assert_eq!(
+            session["choice"]["agent"], "claude",
+            "default before anything was queued"
+        );
+
+        let id = body["id"].as_i64().unwrap();
+        send(
+            &router,
+            "POST",
+            &format!("/api/feedback/{id}/queue"),
+            json!({"agent": "codex", "model": "gpt-6-sol", "effort": "high"}),
+            &[AUTH],
+        )
+        .await;
+        let (_, choice) = send(&router, "GET", "/api/agent-choice", json!(null), &[AUTH]).await;
+        assert_eq!(
+            choice,
+            json!({"agent": "codex", "model": "gpt-6-sol", "effort": "high"})
+        );
+
+        let (_, body) = send(&router, "POST", "/api/feedback", submit, &owner).await;
+        assert_eq!(body["dispatched"], true);
+        assert_eq!(body["run"]["agent"], "codex");
+        assert_eq!(body["run"]["model"], "gpt-6-sol");
+        assert_eq!(body["run"]["requested_by"], "widget");
+        let bad = [origin, ("cookie", "fh_owner=forged")];
+        let (_, session) = send(&router, "GET", "/api/widget/session", json!(null), &bad).await;
+        assert_eq!(session["owner"], false);
     }
 
     #[tokio::test]

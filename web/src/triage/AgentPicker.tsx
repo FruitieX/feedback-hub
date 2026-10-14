@@ -3,13 +3,11 @@
 
 import { RefreshCw, Zap } from 'lucide-react';
 import { Tooltip } from 'radix-ui';
-import { createContext, useCallback, useContext, useMemo, useState } from 'react';
-import { storage } from './api';
+import { createContext, useContext, useMemo, useState } from 'react';
 import { AgentChoice, AgentInfo, ModelInfo, WorkerStatus } from './types';
 import { Option, Select } from './ui';
 
 const DEFAULT = '__default';
-const PREFS_KEY = 'feedbackHub.agentChoice';
 const FALLBACK: AgentInfo[] = ['claude', 'codex', 'hermes'].map((name) => ({
   name,
   models: [],
@@ -70,23 +68,23 @@ function sanitize(choice: AgentChoice, agents: AgentInfo[]): AgentChoice {
   return { agent: agent.name, model: modelId, effort };
 }
 
-/** The last agent choice, remembered per browser and kept valid. */
+/** The owner's last agent choice, kept by the hub so every device (and the widget) shares it. */
+export const ChoiceContext = createContext<{ last: AgentChoice | null; remember: (choice: AgentChoice) => void }>({
+  last: null,
+  remember: () => {},
+});
+
+/** Starts from the last queued choice; edits stay local until something is queued. */
 export function useAgentChoice(): [AgentChoice, (choice: AgentChoice) => void] {
   const { workers } = useWorkers();
+  const { last } = useContext(ChoiceContext);
   const agents = useMemo(() => agentOptions(workers), [workers]);
-  const [choice, setChoice] = useState<AgentChoice>(() => {
-    try {
-      return { agent: 'claude', model: null, effort: null, ...JSON.parse(storage?.getItem(PREFS_KEY) ?? '{}') };
-    } catch {
-      return { agent: 'claude', model: null, effort: null };
-    }
-  });
-  const valid = useMemo(() => sanitize(choice, agents), [choice, agents]);
-  const update = useCallback((next: AgentChoice) => {
-    setChoice(next);
-    storage?.setItem(PREFS_KEY, JSON.stringify(next));
-  }, []);
-  return [valid, update];
+  const [edited, setEdited] = useState<AgentChoice | null>(null);
+  const valid = useMemo(
+    () => sanitize(edited ?? last ?? { agent: 'claude', model: null, effort: null }, agents),
+    [edited, last, agents],
+  );
+  return [valid, setEdited];
 }
 
 export function AgentPicker({ value, onChange }: { value: AgentChoice; onChange: (choice: AgentChoice) => void }) {

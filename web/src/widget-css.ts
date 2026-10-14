@@ -110,7 +110,10 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
 .status:empty { display: none; }
 .check { display: flex; gap: 8px; align-items: flex-start; color: var(--muted); font-size: 13px; }
 .check input { margin-top: 2px; accent-color: var(--accent); }
-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.send { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
+.dispatch { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dispatch:disabled { opacity: .6; cursor: progress; }
 .link { border: 0; background: none; color: var(--muted); font-size: 12px; text-decoration: underline; padding: 4px 0; }
 
 .annotator {
