@@ -63,6 +63,42 @@ impl Server {
         }
     }
 
+    /// Display names for a choice, e.g. `{"model": "Opus 5.5", "effort": "high"}`,
+    /// resolving defaults from what the workers report.
+    fn choice_labels(&self, choice: &AgentChoice) -> serde_json::Value {
+        let workers = self.workers.lock().unwrap_or_else(|p| p.into_inner());
+        let agent = workers
+            .values()
+            .flat_map(|w| w.agents.iter())
+            .find(|a| a.name == choice.agent);
+        let model = choice
+            .model
+            .as_deref()
+            .and_then(|id| agent?.models.iter().find(|m| m.id == id));
+        let model_label = match (
+            &choice.model,
+            model,
+            agent.and_then(|a| a.default_model.as_deref()),
+        ) {
+            (Some(_), Some(m), _) => m.name.clone(),
+            (Some(id), None, _) => id.clone(),
+            (None, _, Some(default)) => format!("{default} (default)"),
+            (None, _, None) => "default model".into(),
+        };
+        let effort_label = match (
+            &choice.effort,
+            model.and_then(|m| m.default_effort.as_deref()),
+        ) {
+            (Some(effort), _) => format!("{effort} effort"),
+            (None, Some(default)) => format!("{default} effort (default)"),
+            (None, None) if model.is_some_and(|m| m.efforts.is_empty()) => {
+                "no effort setting".into()
+            }
+            (None, None) => "default effort".into(),
+        };
+        json!({ "agent": choice.agent, "model": model_label, "effort": effort_label })
+    }
+
     /// Checks a model/effort choice against what online workers report for the agent.
     fn validate_run(&self, run: &NewRun) -> Result<()> {
         if run.agent == "hermes"
@@ -502,8 +538,10 @@ async fn widget_session(
     if !is_owner(&server, &headers) {
         return Ok(Json(json!({ "owner": false })));
     }
+    let choice = last_choice(&server)?;
+    let labels = server.choice_labels(&choice);
     Ok(Json(
-        json!({ "owner": true, "choice": last_choice(&server)? }),
+        json!({ "owner": true, "choice": choice, "labels": labels }),
     ))
 }
 

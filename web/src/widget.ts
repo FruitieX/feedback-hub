@@ -381,7 +381,7 @@ class Widget {
             .map(
               (k) =>
                 `<button type="button" role="radio" data-kind="${k}" aria-checked="${k === this.kind}">${
-                  { bug: 'Problem', idea: 'Idea', other: 'Other' }[k]
+                  { bug: '🐞 Problem', idea: '💡 Idea', other: '💬 Other' }[k]
                 }</button>`,
             )
             .join('')}
@@ -410,7 +410,10 @@ class Widget {
         <footer>
           <button type="button" class="link hide-tab">Hide button for this session</button>
           <span class="send">
-            <button type="button" class="secondary dispatch" hidden>Send &amp; fix</button>
+            <span class="dispatch-group" hidden>
+              <button type="button" class="secondary dispatch">Send &amp; fix</button>
+              <span class="dispatch-details"></span>
+            </span>
             <button type="submit" class="primary">Send</button>
           </span>
         </footer>
@@ -484,11 +487,15 @@ class Widget {
     dispatch.addEventListener('click', () => void this.submit(form, status, true));
     void this.owner().then((session) => {
       if (!session.owner || !session.choice) return;
-      const { agent, model, effort } = session.choice;
-      const what = [agent, model, effort].filter(Boolean).join(' · ');
-      dispatch.hidden = false;
+      const { agent, model, effort } = session.labels ?? {
+        agent: session.choice.agent,
+        model: session.choice.model ?? 'default model',
+        effort: session.choice.effort ? `${session.choice.effort} effort` : 'default effort',
+      };
+      const what = `${agent} · ${model} · ${effort}`;
+      dispatch.closest<HTMLElement>('.dispatch-group')!.hidden = false;
       dispatch.title = `Send and let ${what} work on it right away`;
-      dispatch.textContent = `Send & fix · ${what}`;
+      form.querySelector('.dispatch-details')!.textContent = what;
     });
 
     this.renderShots();
@@ -622,6 +629,7 @@ class Widget {
 interface OwnerSession {
   owner: boolean;
   choice?: { agent: string; model: string | null; effort: string | null };
+  labels?: { agent: string; model: string; effort: string };
 }
 
 function escapeHtml(text: string) {

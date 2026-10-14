@@ -111,8 +111,10 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
 .check { display: flex; gap: 8px; align-items: flex-start; color: var(--muted); font-size: 13px; }
 .check input { margin-top: 2px; accent-color: var(--accent); }
 footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
-.send { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
-.dispatch { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.send { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: flex-start; margin-left: auto; }
+.dispatch-group { display: grid; justify-items: end; gap: 3px; max-width: 100%; }
+.dispatch-group[hidden] { display: none; }
+.dispatch-details { font-size: 11px; color: var(--muted); text-align: right; overflow-wrap: anywhere; max-width: 260px; }
 .dispatch:disabled { opacity: .6; cursor: progress; }
 .link { border: 0; background: none; color: var(--muted); font-size: 12px; text-decoration: underline; padding: 4px 0; }
 

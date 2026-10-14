@@ -252,7 +252,8 @@ try {
   await appTab.locator('feedback-hub-widget .fab').click();
   const dispatch = appTab.locator('feedback-hub-widget .dispatch');
   await dispatch.waitFor({ state: 'visible' });
-  if (!(await dispatch.textContent()).includes('claude · opus · high')) fail(`unexpected dispatch label: ${await dispatch.textContent()}`);
+  const details = await appTab.locator('feedback-hub-widget .dispatch-details').textContent();
+  if (details !== 'claude · Opus 5.5 · high effort') fail(`unexpected dispatch details: ${details}`);
   await appTab.locator('feedback-hub-widget textarea').fill('Header overlaps the menu');
   await appTab.screenshot({ path: `${out}/widget-owner.png` });
   await dispatch.click();
@@ -270,6 +271,7 @@ try {
   await stranger.locator('feedback-hub-widget textarea').waitFor();
   await stranger.waitForTimeout(500);
   if (await stranger.locator('feedback-hub-widget .dispatch').isVisible()) fail('stranger was offered Send & fix');
+  await stranger.screenshot({ path: `${out}/widget-stranger.png` });
   await stranger.close();
   console.log('e2e ok');
 } finally {
