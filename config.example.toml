@@ -6,15 +6,26 @@ token_file = "~/.config/feedback-hub/token"   # or: token = "..."
 # name = "honeydew"              # defaults to the hostname
 default_agent = "claude"         # used when an item was queued without an agent
 # agents = ["claude", "codex"]   # agents this machine runs (default: all configured)
-poll_seconds = 30
-max_runtime_minutes = 90
+poll_seconds = 10
+max_runtime_minutes = 90         # per agent process (each turn/resume)
+max_parallel = 2                 # runs executing at once on this machine
 worktree_root = "~/worktrees"    # worktrees go to <root>/<repo>/feedback-<id>
 delivery = "push"                # push | branch | pr
 include_open = false             # true = also start agents on new, un-queued feedback
 
-# Override or add agents. Placeholders: {prompt} {prompt_file} {workdir} {id} {app}
+# Built-in agents: claude, codex, hermes. Tune them or add others.
 # [agents.claude]
-# command = ["claude", "-p", "--permission-mode", "bypassPermissions", "{prompt}"]
+# max_parallel = 1                       # e.g. to stay within subscription limits
+# models = ["fable", "opus", "sonnet"]   # suggestions in the UI (any model can be typed)
+# efforts = ["low", "medium", "high", "xhigh", "max"]
+# args = ["--fallback-model", "sonnet"]  # extra CLI arguments
+# program = "/path/to/claude"
+#
+# Any other CLI (plain output, no steering). Placeholders:
+# {prompt} {prompt_file} {workdir} {id} {app} {model} {effort}
+# [agents.aider]
+# kind = "command"
+# command = ["aider", "--yes-always", "--model", "{model}", "--message-file", "{prompt_file}"]
 
 # App id → local checkout, when it isn't ~/<app id> or the registry's `checkout`.
 [repos]

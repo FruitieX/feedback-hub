@@ -38,54 +38,73 @@ pub struct WorkerConfig {
     pub include_open: bool,
     /// `push` (default branch), `branch` (push the feedback branch) or `pr`.
     pub delivery: Option<String>,
+    /// Runs executed at the same time (default 2).
+    pub max_parallel: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct AgentConfig {
-    /// argv; `{prompt}`, `{prompt_file}`, `{workdir}`, `{id}` and `{app}` are substituted.
-    pub command: Vec<String>,
+    /// `claude`, `codex`, `hermes` (built-in adapters with streaming, model and
+    /// effort selection and steering) or `command` (a plain argv template).
+    /// Defaults to the agent's name for the built-ins, else `command`.
+    pub kind: Option<String>,
+    /// argv for `kind = "command"`; `{prompt}`, `{prompt_file}`, `{workdir}`,
+    /// `{id}`, `{app}`, `{model}` and `{effort}` are substituted.
+    pub command: Option<Vec<String>>,
+    /// Executable for the built-in kinds (default: the kind's name).
+    pub program: Option<String>,
+    /// Extra arguments for the built-in kinds.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Models offered in the UI (any other value can still be typed in).
+    pub models: Option<Vec<String>>,
+    /// Reasoning effort levels offered in the UI.
+    pub efforts: Option<Vec<String>>,
+    /// How many runs of this agent may run at once on this worker.
+    pub max_parallel: Option<usize>,
+}
+
+pub const BUILTIN_AGENTS: &[&str] = &["claude", "codex", "hermes"];
+
+impl AgentConfig {
+    pub fn kind(&self, name: &str) -> String {
+        match (&self.kind, &self.command) {
+            (Some(kind), _) => kind.clone(),
+            (None, Some(_)) => "command".into(),
+            (None, None) if BUILTIN_AGENTS.contains(&name) => name.into(),
+            (None, None) => "command".into(),
+        }
+    }
+
+    pub fn models(&self, kind: &str) -> Vec<String> {
+        let defaults: &[&str] = match kind {
+            "claude" => &["fable", "opus", "sonnet", "haiku"],
+            "codex" => &["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol"],
+            _ => &[],
+        };
+        self.models
+            .clone()
+            .unwrap_or_else(|| defaults.iter().map(|s| s.to_string()).collect())
+    }
+
+    pub fn efforts(&self, kind: &str) -> Vec<String> {
+        let defaults: &[&str] = match kind {
+            "claude" => &["low", "medium", "high", "xhigh", "max"],
+            "codex" => &["low", "medium", "high", "xhigh"],
+            "hermes" => &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+            _ => &[],
+        };
+        self.efforts
+            .clone()
+            .unwrap_or_else(|| defaults.iter().map(|s| s.to_string()).collect())
+    }
 }
 
 pub fn default_agents() -> BTreeMap<String, AgentConfig> {
-    let agent = |argv: &[&str]| AgentConfig {
-        command: argv.iter().map(|s| s.to_string()).collect(),
-    };
-    BTreeMap::from([
-        (
-            "claude".to_string(),
-            agent(&[
-                "claude",
-                "-p",
-                "--permission-mode",
-                "bypassPermissions",
-                "{prompt}",
-            ]),
-        ),
-        (
-            "codex".to_string(),
-            agent(&[
-                "codex",
-                "exec",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "-C",
-                "{workdir}",
-                "{prompt}",
-            ]),
-        ),
-        (
-            "hermes".to_string(),
-            agent(&[
-                "hermes",
-                "chat",
-                "-Q",
-                "--yolo",
-                "--in",
-                "{workdir}",
-                "--query-file",
-                "{prompt_file}",
-            ]),
-        ),
-    ])
+    BUILTIN_AGENTS
+        .iter()
+        .map(|name| (name.to_string(), AgentConfig::default()))
+        .collect()
 }
 
 pub fn expand_home(path: &str) -> PathBuf {
@@ -156,9 +175,12 @@ impl ClientConfig {
         }
     }
 
+    /// The built-in agents plus configured ones (which replace a built-in of the same name).
     pub fn agents(&self) -> BTreeMap<String, AgentConfig> {
         let mut agents = default_agents();
-        agents.extend(self.agents.clone());
+        for (name, agent) in &self.agents {
+            agents.insert(name.clone(), agent.clone());
+        }
         agents
     }
 }

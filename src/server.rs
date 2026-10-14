@@ -4,6 +4,7 @@
 use crate::{
     apps::AppInfo,
     db::{Database, Event, Feedback, ListFilter, NewFeedback, NewScreenshot, STATUSES, Screenshot},
+    runs::{NewRun, Run, RunEvent, RunFilter, RunUpdate, WorkerStatus},
 };
 use axum::{
     Json, Router,
@@ -17,7 +18,11 @@ use axum::{
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     services::{ServeDir, ServeFile},
@@ -39,6 +44,18 @@ pub struct Config {
 pub struct Server {
     pub db: Database,
     pub config: Arc<Config>,
+    /// Latest heartbeat per worker; kept in memory since it is only a liveness view.
+    pub workers: Arc<Mutex<BTreeMap<String, WorkerStatus>>>,
+}
+
+impl Server {
+    pub fn new(db: Database, config: Config) -> Self {
+        Self {
+            db,
+            config: Arc::new(config),
+            workers: Arc::default(),
+        }
+    }
 }
 
 pub struct ApiError(StatusCode, String);
@@ -58,6 +75,10 @@ impl From<anyhow::Error> for ApiError {
 
 fn bad_request(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
+}
+
+fn conflict(msg: impl Into<String>) -> ApiError {
+    ApiError(StatusCode::CONFLICT, msg.into())
 }
 
 fn not_found() -> ApiError {
@@ -129,7 +150,18 @@ pub fn app(server: Server) -> Router {
         .route("/api/feedback/{id}/screenshots/{idx}", get(screenshot))
         .route("/api/feedback/{id}/events", post(comment))
         .route("/api/feedback/{id}/queue", post(queue))
-        .route("/api/worker/claim", post(claim))
+        .route("/api/runs", get(list_runs).post(create_runs))
+        .route("/api/runs/{id}", get(run_detail).patch(update_run))
+        .route(
+            "/api/runs/{id}/events",
+            get(run_events).post(add_run_events),
+        )
+        .route("/api/runs/{id}/commands", post(add_command))
+        .route("/api/runs/{id}/commands/take", post(take_commands))
+        .route("/api/worker/claim", post(legacy_claim))
+        .route("/api/worker/claim-run", post(claim))
+        .route("/api/worker/heartbeat", post(heartbeat))
+        .route("/api/workers", get(list_workers))
         .route_layer(middleware::from_fn_with_state(
             server.clone(),
             require_token,
@@ -373,6 +405,7 @@ struct Detail {
     feedback: Feedback,
     screenshots: Vec<Screenshot>,
     events: Vec<Event>,
+    runs: Vec<Run>,
 }
 
 async fn detail(State(server): State<Server>, Path(id): Path<i64>) -> Result<Json<Detail>> {
@@ -381,6 +414,11 @@ async fn detail(State(server): State<Server>, Path(id): Path<i64>) -> Result<Jso
         feedback,
         screenshots: server.db.screenshots(id)?,
         events: server.db.events(id)?,
+        runs: server.db.list_runs(&RunFilter {
+            active_only: false,
+            feedback_id: Some(id),
+            limit: 50,
+        })?,
     }))
 }
 
@@ -428,21 +466,66 @@ async fn update(
             STATUSES.join(", ")
         )));
     }
-    server.db.set_status(
-        id,
-        &body.status,
-        &author(body.author),
-        body.note.as_deref(),
-        body.agent.as_deref(),
-    )?;
+    if body.status == "queued" {
+        // Queued items need a run for a worker to pick them up.
+        let feedback = server.db.get(id)?.ok_or_else(not_found)?;
+        let agent = clip(body.agent, 32)
+            .or(feedback.agent)
+            .unwrap_or_else(|| "claude".into());
+        let new = NewRun {
+            agent,
+            model: None,
+            effort: None,
+            note: clip(body.note, MAX_NOTE_CHARS),
+        };
+        server
+            .db
+            .create_run(id, &new, &author(body.author))?
+            .map_err(|run| conflict(format!("#{id} already has active run #{run}")))?;
+    } else {
+        server.db.set_status(
+            id,
+            &body.status,
+            &author(body.author),
+            body.note.as_deref(),
+            body.agent.as_deref(),
+        )?;
+    }
     Ok(Json(server.db.get(id)?.ok_or_else(not_found)?))
 }
+
+const MAX_NOTE_CHARS: usize = 4000;
 
 #[derive(Deserialize)]
 struct QueueBody {
     agent: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
     note: Option<String>,
     author: Option<String>,
+}
+
+fn identifier(value: Option<String>, what: &str) -> Result<Option<String>> {
+    let value = clip(value, 100);
+    if let Some(v) = &value
+        && !v
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.:/@[]".contains(c))
+    {
+        return Err(bad_request(format!("invalid {what} {v:?}")));
+    }
+    Ok(value)
+}
+
+impl QueueBody {
+    fn new_run(&self) -> Result<NewRun> {
+        Ok(NewRun {
+            agent: identifier(self.agent.clone(), "agent")?.unwrap_or_else(|| "claude".into()),
+            model: identifier(self.model.clone(), "model")?,
+            effort: identifier(self.effort.clone(), "effort")?,
+            note: clip(self.note.clone(), MAX_NOTE_CHARS),
+        })
+    }
 }
 
 async fn queue(
@@ -451,14 +534,10 @@ async fn queue(
     Json(body): Json<QueueBody>,
 ) -> Result<Json<Feedback>> {
     server.db.get(id)?.ok_or_else(not_found)?;
-    let agent = clip(body.agent, 32);
-    server.db.set_status(
-        id,
-        "queued",
-        &author(body.author),
-        body.note.as_deref(),
-        agent.as_deref(),
-    )?;
+    server
+        .db
+        .create_run(id, &body.new_run()?, &author(body.author.clone()))?
+        .map_err(|run| conflict(format!("#{id} already has active run #{run}")))?;
     Ok(Json(server.db.get(id)?.ok_or_else(not_found)?))
 }
 
@@ -506,19 +585,233 @@ struct ClaimBody {
     include_open: bool,
 }
 
+/// Workers from before runs existed must not claim runs they can't execute.
+async fn legacy_claim() -> ApiError {
+    ApiError(
+        StatusCode::GONE,
+        "this worker is outdated; update feedback-hub on the worker machine".into(),
+    )
+}
+
 async fn claim(State(server): State<Server>, Json(body): Json<ClaimBody>) -> Result<Response> {
     let worker = clip(Some(body.worker), 100).unwrap_or_else(|| "worker".into());
     Ok(
-        match server.db.claim(
+        match server.db.claim_run(
             &worker,
             &body.agents,
             &body.default_agent,
             body.include_open,
         )? {
-            Some(item) => Json(item).into_response(),
+            Some(run) => Json(run).into_response(),
             None => StatusCode::NO_CONTENT.into_response(),
         },
     )
+}
+
+async fn heartbeat(
+    State(server): State<Server>,
+    Json(mut status): Json<WorkerStatus>,
+) -> Result<StatusCode> {
+    status.name = clip(Some(status.name), 100).unwrap_or_else(|| "worker".into());
+    status.last_seen = crate::db::now();
+    let mut workers = server.workers.lock().unwrap_or_else(|p| p.into_inner());
+    workers.insert(status.name.clone(), status);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_workers(State(server): State<Server>) -> Json<Vec<WorkerStatus>> {
+    let workers = server.workers.lock().unwrap_or_else(|p| p.into_inner());
+    Json(workers.values().cloned().collect())
+}
+
+#[derive(Deserialize)]
+struct CreateRunsBody {
+    ids: Vec<i64>,
+    #[serde(flatten)]
+    run: QueueBody,
+}
+
+async fn create_runs(
+    State(server): State<Server>,
+    Json(body): Json<CreateRunsBody>,
+) -> Result<Json<serde_json::Value>> {
+    if body.ids.is_empty() || body.ids.len() > 100 {
+        return Err(bad_request("select between 1 and 100 items"));
+    }
+    let new = body.run.new_run()?;
+    let author = author(body.run.author.clone());
+    let mut created = Vec::new();
+    let mut skipped = Vec::new();
+    for id in body.ids {
+        if server.db.get(id)?.is_none() {
+            skipped.push(json!({ "id": id, "reason": "not found" }));
+            continue;
+        }
+        match server.db.create_run(id, &new, &author)? {
+            Ok(run) => created.push(run),
+            Err(active) => skipped
+                .push(json!({ "id": id, "reason": format!("already has active run #{active}") })),
+        }
+    }
+    Ok(Json(json!({ "created": created, "skipped": skipped })))
+}
+
+#[derive(Deserialize)]
+struct RunListQuery {
+    active: Option<bool>,
+    feedback: Option<i64>,
+    limit: Option<i64>,
+}
+
+async fn list_runs(
+    State(server): State<Server>,
+    Query(query): Query<RunListQuery>,
+) -> Result<Json<Vec<Run>>> {
+    Ok(Json(server.db.list_runs(&RunFilter {
+        active_only: query.active.unwrap_or(false),
+        feedback_id: query.feedback,
+        limit: query.limit.unwrap_or(100),
+    })?))
+}
+
+#[derive(serde::Serialize)]
+struct RunDetail {
+    #[serde(flatten)]
+    run: Run,
+    events: Vec<RunEvent>,
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    after: Option<i64>,
+    limit: Option<i64>,
+}
+
+async fn run_detail(
+    State(server): State<Server>,
+    Path(id): Path<i64>,
+    Query(query): Query<EventsQuery>,
+) -> Result<Json<RunDetail>> {
+    let run = server.db.get_run(id)?.ok_or_else(not_found)?;
+    let events = server
+        .db
+        .run_events(id, query.after.unwrap_or(0), query.limit.unwrap_or(1000))?;
+    Ok(Json(RunDetail { run, events }))
+}
+
+async fn run_events(
+    State(server): State<Server>,
+    Path(id): Path<i64>,
+    Query(query): Query<EventsQuery>,
+) -> Result<Json<Vec<RunEvent>>> {
+    server.db.get_run(id)?.ok_or_else(not_found)?;
+    Ok(Json(server.db.run_events(
+        id,
+        query.after.unwrap_or(0),
+        query.limit.unwrap_or(1000),
+    )?))
+}
+
+const MAX_EVENT_CHARS: usize = 8000;
+
+#[derive(Deserialize)]
+struct NewRunEvent {
+    kind: String,
+    body: String,
+}
+
+async fn add_run_events(
+    State(server): State<Server>,
+    Path(id): Path<i64>,
+    Json(events): Json<Vec<NewRunEvent>>,
+) -> Result<StatusCode> {
+    server.db.get_run(id)?.ok_or_else(not_found)?;
+    if events.len() > 500 {
+        return Err(bad_request("at most 500 events per request"));
+    }
+    let events: Vec<(String, String)> = events
+        .into_iter()
+        .map(|e| {
+            let mut body = e.body;
+            if body.chars().count() > MAX_EVENT_CHARS {
+                body = body.chars().take(MAX_EVENT_CHARS).collect::<String>() + "…";
+            }
+            (e.kind.chars().take(32).collect(), body)
+        })
+        .collect();
+    server.db.add_run_events(id, &events)?;
+    Ok(StatusCode::CREATED)
+}
+
+async fn update_run(
+    State(server): State<Server>,
+    Path(id): Path<i64>,
+    Json(update): Json<RunUpdate>,
+) -> Result<Json<Run>> {
+    server.db.get_run(id)?.ok_or_else(not_found)?;
+    if let Some(status) = &update.status
+        && !crate::runs::RUN_STATUSES.contains(&status.as_str())
+    {
+        return Err(bad_request(format!("unknown run status {status}")));
+    }
+    Ok(Json(
+        server.db.update_run(id, &update)?.ok_or_else(not_found)?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct CommandBody {
+    kind: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    interrupt: bool,
+    author: Option<String>,
+}
+
+async fn add_command(
+    State(server): State<Server>,
+    Path(id): Path<i64>,
+    Json(body): Json<CommandBody>,
+) -> Result<Json<Run>> {
+    let run = server.db.get_run(id)?.ok_or_else(not_found)?;
+    let text = body.body.trim();
+    match body.kind.as_str() {
+        "stop" => {
+            if !crate::runs::ACTIVE.contains(&run.status.as_str()) {
+                return Err(conflict(format!("run #{id} is not active")));
+            }
+        }
+        "message" => {
+            if text.is_empty() {
+                return Err(bad_request("message is empty"));
+            }
+            if text.chars().count() > MAX_MESSAGE_CHARS {
+                return Err(bad_request("message is too long"));
+            }
+            if !crate::runs::ACTIVE.contains(&run.status.as_str()) && run.session_id.is_none() {
+                return Err(conflict(format!(
+                    "run #{id} has no agent session to continue; queue a new run instead"
+                )));
+            }
+        }
+        _ => return Err(bad_request("kind must be message or stop")),
+    }
+    Ok(Json(server.db.add_command(
+        id,
+        &body.kind,
+        text,
+        body.interrupt,
+        &author(body.author),
+    )?))
+}
+
+async fn take_commands(
+    State(server): State<Server>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<crate::runs::Command>>> {
+    server.db.get_run(id)?.ok_or_else(not_found)?;
+    Ok(Json(server.db.take_commands(id)?))
 }
 
 #[cfg(test)]
@@ -533,15 +826,15 @@ mod tests {
     fn test_server() -> (Router, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), "DELETE").unwrap();
-        let server = Server {
+        let server = Server::new(
             db,
-            config: Arc::new(Config {
+            Config {
                 admin_token: "secret".into(),
                 allowed_origins: vec!["https://*.example.org".into()],
                 static_dir: None,
                 apps: vec![],
-            }),
-        };
+            },
+        );
         (app(server), dir)
     }
 
@@ -648,8 +941,18 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["status"], "queued");
 
+        let (status, _) = send(&router, "POST", "/api/worker/claim", json!({}), &[AUTH]).await;
+        assert_eq!(status, StatusCode::GONE, "outdated workers are refused");
+
         let claim_body = json!({"worker": "w", "agents": ["claude"], "defaultAgent": "claude"});
-        let (status, _) = send(&router, "POST", "/api/worker/claim", claim_body, &[AUTH]).await;
+        let (status, _) = send(
+            &router,
+            "POST",
+            "/api/worker/claim-run",
+            claim_body,
+            &[AUTH],
+        )
+        .await;
         assert_eq!(
             status,
             StatusCode::NO_CONTENT,
@@ -661,15 +964,23 @@ mod tests {
         let (status, body) = send(
             &router,
             "POST",
-            "/api/worker/claim",
+            "/api/worker/claim-run",
             claim_body.clone(),
             &[AUTH],
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["status"], "in_progress");
-        assert_eq!(body["attempts"], 1);
-        let (status, _) = send(&router, "POST", "/api/worker/claim", claim_body, &[AUTH]).await;
+        assert_eq!(body["status"], "running");
+        assert_eq!(body["agent"], "codex");
+        assert_eq!(body["feedback_id"], id);
+        let (status, _) = send(
+            &router,
+            "POST",
+            "/api/worker/claim-run",
+            claim_body,
+            &[AUTH],
+        )
+        .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
 
         let (status, _) = send(
@@ -717,6 +1028,142 @@ mod tests {
         );
         assert_eq!(body["screenshots"][0]["mime"], "image/png");
         assert_eq!(body["screenshots"][0]["note"], "Save does nothing");
+    }
+
+    #[tokio::test]
+    async fn bulk_queue_steer_and_stream_runs() {
+        let (router, _dir) = test_server();
+        let mut ids = vec![];
+        for message in ["one", "two"] {
+            let (_, body) = send(
+                &router,
+                "POST",
+                "/api/feedback",
+                json!({"app": "demo", "message": message}),
+                &[],
+            )
+            .await;
+            ids.push(body["id"].as_i64().unwrap());
+        }
+        let (status, body) = send(
+            &router,
+            "POST",
+            "/api/runs",
+            json!({"ids": ids, "agent": "claude", "model": "opus", "effort": "high", "note": "Keep it small"}),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["created"].as_array().unwrap().len(), 2);
+        let (_, body) = send(
+            &router,
+            "POST",
+            "/api/runs",
+            json!({"ids": [ids[0]], "agent": "claude"}),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(
+            body["skipped"].as_array().unwrap().len(),
+            1,
+            "already active"
+        );
+        let (status, _) = send(
+            &router,
+            "POST",
+            "/api/runs",
+            json!({"ids": [ids[0]], "agent": "claude", "model": "opus; rm -rf"}),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let claim = json!({"worker": "w", "agents": ["claude"], "defaultAgent": "claude"});
+        let (_, run) = send(&router, "POST", "/api/worker/claim-run", claim, &[AUTH]).await;
+        let run_id = run["id"].as_i64().unwrap();
+        assert_eq!(run["model"], "opus");
+        assert_eq!(run["note"], "Keep it small");
+
+        let (status, _) = send(
+            &router,
+            "POST",
+            &format!("/api/runs/{run_id}/events"),
+            json!([{"kind": "text", "body": "Looking at it"}, {"kind": "tool", "body": "Bash: ls"}]),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (_, run) = send(
+            &router,
+            "POST",
+            &format!("/api/runs/{run_id}/commands"),
+            json!({"kind": "message", "body": "Check the mobile layout too"}),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(run["pending_messages"], 1);
+        let (_, commands) = send(
+            &router,
+            "POST",
+            &format!("/api/runs/{run_id}/commands/take"),
+            json!({}),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(commands[0]["body"], "Check the mobile layout too");
+
+        let (status, run) = send(
+            &router,
+            "PATCH",
+            &format!("/api/runs/{run_id}"),
+            json!({"status": "succeeded", "session_id": "s-1", "cost_usd": 0.25}),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(run["finished_at"].is_string());
+
+        let (_, detail) = send(
+            &router,
+            "GET",
+            &format!("/api/runs/{run_id}?after=0"),
+            json!(null),
+            &[AUTH],
+        )
+        .await;
+        let kinds: Vec<&str> = detail["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap())
+            .collect();
+        assert!(kinds.contains(&"tool") && kinds.contains(&"user"));
+
+        let (_, active) = send(
+            &router,
+            "GET",
+            "/api/runs?active=true",
+            json!(null),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(
+            active.as_array().unwrap().len(),
+            1,
+            "the other run is still queued"
+        );
+
+        let (status, _) = send(
+            &router,
+            "POST",
+            "/api/worker/heartbeat",
+            json!({"name": "w", "agents": [{"name": "claude", "models": ["opus"], "efforts": ["high"], "live_steering": true}], "running": [run_id], "max_parallel": 2}),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, workers) = send(&router, "GET", "/api/workers", json!(null), &[AUTH]).await;
+        assert_eq!(workers[0]["agents"][0]["models"][0], "opus");
     }
 
     #[tokio::test]

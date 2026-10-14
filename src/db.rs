@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_feedback ON events(feedback_id, id);
 ";
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
@@ -167,19 +167,21 @@ impl Database {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(crate::runs::SCHEMA)?;
         // Added after the first deployment; older databases lack the column.
         if let Err(err) = conn.execute("ALTER TABLE screenshots ADD COLUMN note TEXT", [])
             && !err.to_string().contains("duplicate column")
         {
             return Err(err.into());
         }
+        crate::runs::migrate(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             screenshot_dir,
         })
     }
 
-    fn conn(&self) -> MutexGuard<'_, Connection> {
+    pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {
         self.conn
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -287,7 +289,7 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    fn add_event_tx(
+    pub(crate) fn add_event_tx(
         conn: &Connection,
         id: i64,
         author: &str,
@@ -320,19 +322,32 @@ impl Database {
         note: Option<&str>,
         agent: Option<&str>,
     ) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        Self::set_status_tx(&tx, id, status, author, note, agent)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn set_status_tx(
+        conn: &Connection,
+        id: i64,
+        status: &str,
+        author: &str,
+        note: Option<&str>,
+        agent: Option<&str>,
+    ) -> Result<()> {
         if !STATUSES.contains(&status) {
             bail!(
                 "unknown status {status:?}; expected one of {}",
                 STATUSES.join(", ")
             );
         }
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
         let previous: String =
-            tx.query_row("SELECT status FROM feedback WHERE id = ?1", [id], |r| {
+            conn.query_row("SELECT status FROM feedback WHERE id = ?1", [id], |r| {
                 r.get(0)
             })?;
-        tx.execute(
+        conn.execute(
             "UPDATE feedback SET status = ?2, agent = COALESCE(?3, agent) WHERE id = ?1",
             params![id, status, agent],
         )?;
@@ -344,9 +359,7 @@ impl Database {
             body.push_str("\n\n");
             body.push_str(note.trim());
         }
-        Self::add_event_tx(&tx, id, author, "status", &body)?;
-        tx.commit()?;
-        Ok(())
+        Self::add_event_tx(conn, id, author, "status", &body)
     }
 
     pub fn delete(&self, id: i64) -> Result<bool> {
@@ -359,48 +372,5 @@ impl Database {
             let _ = std::fs::remove_file(self.screenshot_path(id, shot.idx, &shot.mime));
         }
         Ok(deleted)
-    }
-
-    /// Atomically hands the oldest queued item (optionally also never-attempted
-    /// open items) whose requested agent this worker supports to the worker.
-    pub fn claim(
-        &self,
-        worker: &str,
-        agents: &[String],
-        default_agent: &str,
-        include_open: bool,
-    ) -> Result<Option<Feedback>> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        let candidates: Vec<(i64, Option<String>, String)> = {
-            let mut stmt = tx.prepare(
-                "SELECT id, agent, status FROM feedback
-                 WHERE status = 'queued' OR (?1 AND status = 'open' AND attempts = 0)
-                 ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, id",
-            )?;
-            let rows = stmt.query_map([include_open], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        let pick = candidates.into_iter().find_map(|(id, agent, _)| {
-            let agent = agent.unwrap_or_else(|| default_agent.to_string());
-            agents.contains(&agent).then_some((id, agent))
-        });
-        let Some((id, agent)) = pick else {
-            return Ok(None);
-        };
-        tx.execute(
-            "UPDATE feedback SET status = 'in_progress', agent = ?2, attempts = attempts + 1 WHERE id = ?1",
-            params![id, agent],
-        )?;
-        Self::add_event_tx(
-            &tx,
-            id,
-            worker,
-            "claimed",
-            &format!("Worker {worker} started agent {agent}"),
-        )?;
-        tx.commit()?;
-        drop(conn);
-        self.get(id)
     }
 }

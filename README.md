@@ -12,16 +12,18 @@ can pick it up and fix things.
   requests.
 - **Server** (`feedback-hub serve`): Rust + SQLite. Anonymous `POST
   /api/feedback` for apps (origin-checked), everything else behind an admin
-  token. Serves the widget and a triage UI at `/`.
-- **CLI** (`feedback-hub list|show|comment|status|queue|apps|prompt`): how
-  humans and agents read and update feedback.
-- **Worker** (`feedback-hub worker`): polls for queued items and runs Claude
-  Code, Codex or Hermes in a fresh git worktree of the app's repo.
+  token. Serves the widget and the triage UI at `/`: browse feedback, tick
+  items and send them to an agent with a chosen model and reasoning effort,
+  and (under **Agents**) watch runs live, steer, stop or continue them.
+- **CLI** (`feedback-hub list|show|comment|status|queue|runs|run|steer|stop|apps|prompt`):
+  how humans and agents read and update feedback and runs.
+- **Worker** (`feedback-hub worker`): claims queued runs and executes Claude
+  Code, Codex or Hermes in git worktrees of the app's repos, several at once.
 
 ```
 app page ──(gateway injects <script src=…/widget.js>)──▶ widget ──POST──▶ feedback-hub (k8s, private)
                                                                              ▲      │
-                     triage UI: queue for claude/codex/hermes ───────────────┘      │ claim
+          triage UI: queue runs, watch & steer them ──────────────────────────┘      │ claim, events ↑, commands ↓
                                                                                     ▼
                                            workstation: feedback-hub worker → agent in ~/worktrees/<repo>/feedback-<id>
 ```
@@ -58,8 +60,12 @@ feedback-hub apps                     # app id → repository
 feedback-hub comment 12 "Found it: …"
 feedback-hub status 12 resolved --note "Fixed in abc123, verified with …"
 feedback-hub status 12 open --note "Need to know whether …"   # needs the owner
-feedback-hub queue 12 --agent codex   # hand to the worker
+feedback-hub queue 12 --agent codex --model gpt-6-sol --effort high   # hand to the worker
 feedback-hub prompt 12                # the prompt the worker would use
+feedback-hub runs                     # queued/running agent runs (--all for history)
+feedback-hub run 3 -f                 # follow a run's activity
+feedback-hub steer 3 "Also check …"   # message the agent (or continue a finished run)
+feedback-hub stop 3
 ```
 
 Configuration lives in `~/.config/feedback-hub/config.toml` (see
@@ -67,13 +73,31 @@ Configuration lives in `~/.config/feedback-hub/config.toml` (see
 
 ## Agent worker
 
-`feedback-hub worker` claims items that were **queued** (from the triage UI or
-`feedback-hub queue`), creates `~/worktrees/<repo>/feedback-<id>` from
-`origin/<default branch>`, downloads screenshots, and runs the chosen agent
-with a prompt containing the report and instructions to fix, verify,
-commit/push (per `delivery`), and report back with `feedback-hub status`.
-The agent's output tail is posted to the item's timeline; if the agent ends
+Queueing an item creates a **run**: agent, optional model and reasoning effort,
+and optional instructions. `feedback-hub worker` claims queued runs (up to
+`max_parallel` at once), creates `~/worktrees/<repo>/feedback-<id>` from
+`origin/<default branch>`, downloads screenshots, and runs the agent with a
+prompt containing the report and instructions to fix, verify, commit/push (per
+`delivery`), and report back with `feedback-hub status`. If the agent ends
 without resolving, the item returns to `open`. Clean worktrees are removed.
+
+The worker only talks to the hub (outbound): it streams the agent's activity
+(messages, tool calls, results) to the run, polls for commands every couple of
+seconds, and sends a heartbeat listing the agents, models and efforts it
+offers, which the UI uses for its pickers.
+
+| Agent | Started as | Steering |
+|---|---|---|
+| `claude` | `claude -p --input-format stream-json --output-format stream-json` | live: messages are written to the running session |
+| `codex` | `codex exec --json` / `codex exec resume <session>` | after the current turn, or interrupt + resume |
+| `hermes` | `hermes chat --format stream-json` / `--resume <session>` | after the current turn, or interrupt + resume |
+
+A message to a finished run requeues it on the same worker and resumes the
+agent session there. Claude Code is only ever driven through the official
+`claude` CLI with the local login (no API calls, no token reuse), so it works
+with a subscription; keep `max_parallel`/`[agents.claude] max_parallel` modest
+to stay within its usage limits. Any other CLI can be added with
+`kind = "command"` (plain output, no steering) — see `config.example.toml`.
 
 Feedback text is user input. Agents run with permissions bypassed, so the
 worker only runs on items an admin queued unless `include_open = true` — keep

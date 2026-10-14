@@ -4,6 +4,7 @@ use crate::{
     apps::AppInfo,
     config::{ClientConfig, expand_home, home},
     db::{Event, Feedback, Screenshot},
+    runs::{Command, Run, RunEvent, RunUpdate, WorkerStatus},
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -22,6 +23,15 @@ pub struct Detail {
     pub feedback: Feedback,
     pub screenshots: Vec<Screenshot>,
     pub events: Vec<Event>,
+    #[serde(default)]
+    pub runs: Vec<Run>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RunDetail {
+    #[serde(flatten)]
+    pub run: Run,
+    pub events: Vec<RunEvent>,
 }
 
 fn check(mut res: ureq::http::Response<ureq::Body>) -> Result<ureq::http::Response<ureq::Body>> {
@@ -142,28 +152,28 @@ impl Client {
     pub fn queue(
         &self,
         id: i64,
-        agent: Option<&str>,
+        run: &QueueOptions,
         author: &str,
         note: Option<&str>,
     ) -> Result<()> {
         self.send(
             "POST",
             &format!("/api/feedback/{id}/queue"),
-            json!({ "agent": agent, "author": author, "note": note }),
+            json!({ "agent": run.agent, "model": run.model, "effort": run.effort, "author": author, "note": note }),
         )?;
         Ok(())
     }
 
-    pub fn claim(
+    pub fn claim_run(
         &self,
         worker: &str,
         agents: &[String],
         default_agent: &str,
         include_open: bool,
-    ) -> Result<Option<Feedback>> {
+    ) -> Result<Option<Run>> {
         let value = self.send(
             "POST",
-            "/api/worker/claim",
+            "/api/worker/claim-run",
             json!({
                 "worker": worker,
                 "agents": agents,
@@ -172,6 +182,73 @@ impl Client {
             }),
         )?;
         Ok(value.map(serde_json::from_value).transpose()?)
+    }
+
+    pub fn heartbeat(&self, status: &WorkerStatus) -> Result<()> {
+        self.send(
+            "POST",
+            "/api/worker/heartbeat",
+            serde_json::to_value(status)?,
+        )?;
+        Ok(())
+    }
+
+    pub fn runs(&self, active_only: bool, feedback: Option<i64>, limit: i64) -> Result<Vec<Run>> {
+        let mut path = format!("/api/runs?active={active_only}&limit={limit}");
+        if let Some(id) = feedback {
+            path.push_str(&format!("&feedback={id}"));
+        }
+        self.get(&path)
+    }
+
+    pub fn run(&self, id: i64, after: i64) -> Result<RunDetail> {
+        self.get(&format!("/api/runs/{id}?after={after}"))
+    }
+
+    pub fn update_run(&self, id: i64, update: &RunUpdate) -> Result<()> {
+        self.send(
+            "PATCH",
+            &format!("/api/runs/{id}"),
+            serde_json::to_value(update)?,
+        )?;
+        Ok(())
+    }
+
+    pub fn add_run_events(&self, id: i64, events: &[(String, String)]) -> Result<()> {
+        let events: Vec<Value> = events
+            .iter()
+            .map(|(kind, body)| json!({ "kind": kind, "body": body }))
+            .collect();
+        self.send(
+            "POST",
+            &format!("/api/runs/{id}/events"),
+            Value::Array(events),
+        )?;
+        Ok(())
+    }
+
+    pub fn command(
+        &self,
+        id: i64,
+        kind: &str,
+        body: &str,
+        interrupt: bool,
+        author: &str,
+    ) -> Result<Run> {
+        let value = self.send(
+            "POST",
+            &format!("/api/runs/{id}/commands"),
+            json!({ "kind": kind, "body": body, "interrupt": interrupt, "author": author }),
+        )?;
+        Ok(serde_json::from_value(value.context("empty response")?)?)
+    }
+
+    pub fn take_commands(&self, id: i64) -> Result<Vec<Command>> {
+        Ok(self
+            .send("POST", &format!("/api/runs/{id}/commands/take"), json!({}))?
+            .map(serde_json::from_value)
+            .transpose()?
+            .unwrap_or_default())
     }
 
     /// Downloads screenshots into `dir` and returns their paths.
@@ -197,6 +274,14 @@ impl Client {
             })
             .collect()
     }
+}
+
+/// Agent, model and reasoning effort for a run; `None` means the agent's default.
+#[derive(Debug, Default, Clone)]
+pub struct QueueOptions {
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 pub fn cache_dir(id: i64) -> PathBuf {
@@ -400,4 +485,40 @@ pub fn print_list(items: &[Feedback]) {
 pub fn resolve_dir(dir: Option<String>, id: i64) -> PathBuf {
     dir.map(|d| expand_home(&d))
         .unwrap_or_else(|| cache_dir(id))
+}
+
+pub fn print_runs(runs: &[Run]) {
+    if runs.is_empty() {
+        println!("No runs.");
+        return;
+    }
+    for r in runs {
+        let what = [
+            Some(r.agent.as_str()),
+            r.model.as_deref(),
+            r.effort.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("/");
+        let title: String = r.title.chars().take(60).collect();
+        println!(
+            "run {:<5} {:<10} #{:<5} {:<14} {:<24} {:<10} {}",
+            r.id,
+            r.status,
+            r.feedback_id,
+            r.app,
+            what,
+            r.worker.as_deref().unwrap_or("-"),
+            title
+        );
+    }
+}
+
+pub fn print_run_events(events: &[RunEvent]) {
+    for e in events {
+        let time = e.at.get(11..19).unwrap_or(&e.at);
+        println!("{time} [{}] {}", e.kind, e.body.replace('\n', "\n    "));
+    }
 }

@@ -1,13 +1,18 @@
+mod agents;
 mod apps;
 mod client;
 mod config;
 mod db;
+mod runs;
 mod server;
 mod worker;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use client::{Client, default_author, find_app, print_list, render_markdown, resolve_dir};
+use client::{
+    Client, QueueOptions, default_author, find_app, print_list, print_run_events, print_runs,
+    render_markdown, resolve_dir,
+};
 use config::ClientConfig;
 use std::{path::PathBuf, sync::Arc};
 
@@ -83,11 +88,45 @@ enum Cmd {
     /// Queue an item for the agent worker.
     Queue {
         id: i64,
+        /// claude, codex, hermes, … (default: the worker's default agent)
         #[arg(long)]
         agent: Option<String>,
+        /// Model for the agent, e.g. `opus` or `gpt-6-sol` (default: the agent's own default).
+        #[arg(long)]
+        model: Option<String>,
+        /// Reasoning effort, e.g. `low`, `high`, `xhigh`.
+        #[arg(long)]
+        effort: Option<String>,
+        /// Extra instructions for the agent.
         #[arg(long)]
         note: Option<String>,
     },
+    /// List agent runs (default: queued and running).
+    Runs {
+        #[arg(long)]
+        all: bool,
+        /// Only runs for this feedback item.
+        #[arg(long)]
+        feedback: Option<i64>,
+    },
+    /// Show a run's activity log.
+    Run {
+        id: i64,
+        /// Keep printing new activity until the run ends.
+        #[arg(long, short)]
+        follow: bool,
+    },
+    /// Send a message to a running agent, or continue a finished run's session.
+    Steer {
+        run: i64,
+        /// Interrupt the current turn instead of waiting for it to end (Codex, Hermes).
+        #[arg(long)]
+        interrupt: bool,
+        #[arg(required = true)]
+        text: Vec<String>,
+    },
+    /// Stop a running agent or cancel a queued run.
+    Stop { run: i64 },
     /// List registered apps and their repositories.
     Apps,
     /// Submit feedback from the command line (handy for testing).
@@ -137,9 +176,9 @@ async fn main() -> Result<()> {
                 None => Vec::new(),
             };
             let db = db::Database::open(&data_dir, &journal_mode)?;
-            let server = server::Server {
+            let server = server::Server::new(
                 db,
-                config: Arc::new(server::Config {
+                server::Config {
                     admin_token,
                     allowed_origins: allowed_origins
                         .split(',')
@@ -148,8 +187,8 @@ async fn main() -> Result<()> {
                         .collect(),
                     static_dir,
                     apps,
-                }),
-            };
+                },
+            );
             let listener = tokio::net::TcpListener::bind(&bind).await?;
             tracing::info!("listening on {bind}");
             axum::serve(listener, server::app(server))
@@ -173,7 +212,7 @@ async fn main() -> Result<()> {
 fn run_client(command: Cmd) -> Result<()> {
     let config = ClientConfig::load()?;
     if let Cmd::Worker { once } = command {
-        return worker::Worker::new(config)?.run(once);
+        return Arc::new(worker::Worker::new(config)?).run(once);
     }
     let author = default_author();
     if let Cmd::Submit { app, kind, message } = command {
@@ -210,6 +249,7 @@ fn run_client(command: Cmd) -> Result<()> {
                 let mut value = serde_json::to_value(&detail.feedback)?;
                 value["screenshot_paths"] = serde_json::to_value(&paths)?;
                 value["events"] = serde_json::to_value(&detail.events)?;
+                value["runs"] = serde_json::to_value(&detail.runs)?;
                 println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
                 let apps = client.apps().unwrap_or_default();
@@ -232,6 +272,7 @@ fn run_client(command: Cmd) -> Result<()> {
                     &paths,
                     &worker::Target {
                         workdir: &workdir,
+                        note: None,
                         branch: &format!("feedback/{id}"),
                         base: "main",
                         delivery: config.worker.delivery.as_deref().unwrap_or("push"),
@@ -253,12 +294,54 @@ fn run_client(command: Cmd) -> Result<()> {
             client.set_status(id, &status, &author, note.as_deref())?;
             println!("#{id} is now {status}.");
         }
-        Cmd::Queue { id, agent, note } => {
-            client.queue(id, agent.as_deref(), &author, note.as_deref())?;
+        Cmd::Queue {
+            id,
+            agent,
+            model,
+            effort,
+            note,
+        } => {
+            let options = QueueOptions {
+                agent,
+                model,
+                effort,
+            };
+            client.queue(id, &options, &author, note.as_deref())?;
             println!(
                 "#{id} queued{}.",
-                agent.map(|a| format!(" for {a}")).unwrap_or_default()
+                options
+                    .agent
+                    .map(|a| format!(" for {a}"))
+                    .unwrap_or_default()
             );
+        }
+        Cmd::Runs { all, feedback } => print_runs(&client.runs(!all, feedback, 100)?),
+        Cmd::Run { id, follow } => {
+            let mut after = 0;
+            loop {
+                let detail = client.run(id, after)?;
+                if after == 0 {
+                    print_runs(std::slice::from_ref(&detail.run));
+                }
+                print_run_events(&detail.events);
+                after = detail.events.last().map_or(after, |e| e.id);
+                if !follow || !["queued", "running"].contains(&detail.run.status.as_str()) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+        Cmd::Steer {
+            run,
+            interrupt,
+            text,
+        } => {
+            let run = client.command(run, "message", &text.join(" "), interrupt, &author)?;
+            println!("Message sent to run {} ({}).", run.id, run.status);
+        }
+        Cmd::Stop { run } => {
+            let run = client.command(run, "stop", "", false, &author)?;
+            println!("Run {} is {}.", run.id, run.status);
         }
         Cmd::Apps => {
             for app in client.apps()? {

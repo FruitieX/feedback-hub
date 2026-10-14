@@ -169,7 +169,50 @@ try {
   await triage.click('.queue button');
   await triage.locator('.detail .pill.queued').waitFor();
   await triage.screenshot({ path: `${out}/triage-desktop.png` });
+
+  // Bulk: tick the other item and send it to Claude with a model and effort.
+  await triage.locator('.entry:has(.pill.open) input[type=checkbox]').check();
+  await triage.locator('.bulk').waitFor();
+  await triage.selectOption('.bulk [name=agent]', 'claude');
+  await triage.fill('.bulk [name=model]', 'opus');
+  await triage.selectOption('.bulk [name=effort]', 'high');
+  await triage.fill('.bulk [name=note]', 'Keep the fix small');
+  await triage.screenshot({ path: `${out}/triage-bulk.png` });
+  await triage.click('.bulk button.primary');
+  await triage.locator('.bulk').waitFor({ state: 'detached' });
+
+  // Play the worker: heartbeat, claim the bulk run, stream some activity.
+  const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+  const post = (path, body) => fetch(`${hub}${path}`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
+  await post('/api/worker/heartbeat', {
+    name: 'e2e-box',
+    agents: [{ name: 'claude', models: ['opus', 'sonnet'], efforts: ['low', 'high'], live_steering: true }],
+    running: [],
+    max_parallel: 2,
+  });
+  const run = await (await post('/api/worker/claim-run', { worker: 'e2e-box', agents: ['claude'], defaultAgent: 'claude' })).json();
+  if (run.model !== 'opus' || run.effort !== 'high' || run.note !== 'Keep the fix small') fail(`unexpected run ${JSON.stringify(run)}`);
+  await post(`/api/runs/${run.id}/events`, [
+    { kind: 'system', body: 'Model: claude-opus' },
+    { kind: 'text', body: 'Looking at the save handler first.' },
+    { kind: 'tool', body: 'Bash: rg -n "save" src' },
+    { kind: 'tool_result', body: 'src/save.ts:12: export function save() {\nsrc/app.ts:40: save()' },
+  ]);
+
+  await triage.click('[data-view=agents]');
+  await triage.locator(`.run-item[data-run="${run.id}"]`).click();
+  await triage.locator('.ev.tool').waitFor();
+  await triage.fill('.steer textarea', 'Also check the mobile layout');
+  await triage.click('.steer button.primary');
+  await triage.locator('.ev.user', { hasText: 'mobile layout' }).waitFor();
+  const commands = await (await post(`/api/runs/${run.id}/commands/take`, {})).json();
+  if (commands[0]?.body !== 'Also check the mobile layout') fail(`steering message not delivered: ${JSON.stringify(commands)}`);
+  await post(`/api/runs/${run.id}/events`, [{ kind: 'text', body: 'Checked mobile too; fix pushed.' }]);
+  await triage.locator('.ev.text', { hasText: 'fix pushed' }).waitFor({ timeout: 10000 });
+  await triage.screenshot({ path: `${out}/agents-desktop.png` });
   await triage.setViewportSize({ width: 390, height: 844 });
+  await triage.screenshot({ path: `${out}/agents-mobile.png` });
+  await triage.click('[data-view=feedback]');
   await triage.screenshot({ path: `${out}/triage-mobile.png`, fullPage: true });
   await context.close();
   console.log('e2e ok');
