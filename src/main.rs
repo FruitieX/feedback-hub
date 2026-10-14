@@ -3,6 +3,7 @@ mod apps;
 mod client;
 mod config;
 mod db;
+mod models;
 mod runs;
 mod server;
 mod worker;

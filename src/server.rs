@@ -3,7 +3,10 @@
 
 use crate::{
     apps::AppInfo,
-    db::{Database, Event, Feedback, ListFilter, NewFeedback, NewScreenshot, STATUSES, Screenshot},
+    db::{
+        Database, Event, Feedback, FeedbackEdit, ListFilter, NewFeedback, NewScreenshot, STATUSES,
+        Screenshot,
+    },
     runs::{NewRun, Run, RunEvent, RunFilter, RunUpdate, WorkerStatus},
 };
 use axum::{
@@ -19,7 +22,7 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -46,6 +49,8 @@ pub struct Server {
     pub config: Arc<Config>,
     /// Latest heartbeat per worker; kept in memory since it is only a liveness view.
     pub workers: Arc<Mutex<BTreeMap<String, WorkerStatus>>>,
+    /// Workers asked to re-read their agents' model lists on the next heartbeat.
+    pub refresh_models: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl Server {
@@ -54,7 +59,43 @@ impl Server {
             db,
             config: Arc::new(config),
             workers: Arc::default(),
+            refresh_models: Arc::default(),
         }
+    }
+
+    /// Checks a model/effort choice against what online workers report for the agent.
+    fn validate_run(&self, run: &NewRun) -> Result<()> {
+        if run.agent == "hermes"
+            && run
+                .model
+                .as_deref()
+                .is_some_and(crate::models::hermes_model_forbidden)
+        {
+            return Err(bad_request(
+                "Hermes can't run Claude models (it would use the Claude subscription outside the claude CLI); use the claude agent",
+            ));
+        }
+        let workers = self.workers.lock().unwrap_or_else(|p| p.into_inner());
+        let offers: Vec<&crate::runs::AgentInfo> = workers
+            .values()
+            .flat_map(|w| w.agents.iter())
+            .filter(|a| a.name == run.agent)
+            .collect();
+        if offers.is_empty() {
+            // No worker online to ask; the worker reports bad choices when it runs.
+            return Ok(());
+        }
+        let errors: Vec<String> = offers
+            .iter()
+            .filter_map(|a| {
+                a.validate(run.model.as_deref(), run.effort.as_deref())
+                    .err()
+            })
+            .collect();
+        if errors.len() == offers.len() {
+            return Err(bad_request(errors.join("; ")));
+        }
+        Ok(())
     }
 }
 
@@ -162,6 +203,7 @@ pub fn app(server: Server) -> Router {
         .route("/api/worker/claim-run", post(claim))
         .route("/api/worker/heartbeat", post(heartbeat))
         .route("/api/workers", get(list_workers))
+        .route("/api/workers/refresh", post(refresh_workers))
         .route_layer(middleware::from_fn_with_state(
             server.clone(),
             require_token,
@@ -443,11 +485,22 @@ async fn screenshot(
 }
 
 #[derive(Deserialize)]
+struct ScreenshotNote {
+    idx: i64,
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct UpdateBody {
-    status: String,
+    status: Option<String>,
     note: Option<String>,
     author: Option<String>,
     agent: Option<String>,
+    /// Edits to the report itself.
+    message: Option<String>,
+    kind: Option<String>,
+    #[serde(default)]
+    screenshot_notes: Vec<ScreenshotNote>,
 }
 
 fn author(value: Option<String>) -> String {
@@ -459,37 +512,62 @@ async fn update(
     Path(id): Path<i64>,
     Json(body): Json<UpdateBody>,
 ) -> Result<Json<Feedback>> {
-    server.db.get(id)?.ok_or_else(not_found)?;
-    if !STATUSES.contains(&body.status.as_str()) {
-        return Err(bad_request(format!(
-            "status must be one of {}",
-            STATUSES.join(", ")
-        )));
-    }
-    if body.status == "queued" {
-        // Queued items need a run for a worker to pick them up.
-        let feedback = server.db.get(id)?.ok_or_else(not_found)?;
-        let agent = clip(body.agent, 32)
-            .or(feedback.agent)
-            .unwrap_or_else(|| "claude".into());
-        let new = NewRun {
-            agent,
-            model: None,
-            effort: None,
-            note: clip(body.note, MAX_NOTE_CHARS),
+    let feedback = server.db.get(id)?.ok_or_else(not_found)?;
+    let who = author(body.author.clone());
+    if body.message.is_some() || body.kind.is_some() || !body.screenshot_notes.is_empty() {
+        if let Some(kind) = &body.kind
+            && !["bug", "idea", "other"].contains(&kind.as_str())
+        {
+            return Err(bad_request("kind must be bug, idea or other"));
+        }
+        let message = body.message.as_deref().map(str::trim);
+        if message.is_some_and(|m| m.chars().count() > MAX_MESSAGE_CHARS) {
+            return Err(bad_request("message is too long"));
+        }
+        let edit = FeedbackEdit {
+            message: message.map(String::from),
+            kind: body.kind.clone(),
+            screenshot_notes: body
+                .screenshot_notes
+                .into_iter()
+                .map(|n| (n.idx, clip(n.note, 1000)))
+                .collect(),
         };
-        server
-            .db
-            .create_run(id, &new, &author(body.author))?
-            .map_err(|run| conflict(format!("#{id} already has active run #{run}")))?;
-    } else {
-        server.db.set_status(
-            id,
-            &body.status,
-            &author(body.author),
-            body.note.as_deref(),
-            body.agent.as_deref(),
-        )?;
+        server.db.edit(id, &edit, &who)?;
+    }
+    match body.status.as_deref() {
+        None => {}
+        Some(status) if !STATUSES.contains(&status) => {
+            return Err(bad_request(format!(
+                "status must be one of {}",
+                STATUSES.join(", ")
+            )));
+        }
+        Some("queued") => {
+            // Queued items need a run for a worker to pick them up.
+            let agent = clip(body.agent, 32)
+                .or(feedback.agent)
+                .unwrap_or_else(|| "claude".into());
+            let new = NewRun {
+                agent,
+                model: None,
+                effort: None,
+                note: clip(body.note, MAX_NOTE_CHARS),
+            };
+            server
+                .db
+                .create_run(id, &new, &who)?
+                .map_err(|run| conflict(format!("#{id} already has active run #{run}")))?;
+        }
+        Some(status) => {
+            server.db.set_status(
+                id,
+                status,
+                &who,
+                body.note.as_deref(),
+                body.agent.as_deref(),
+            )?;
+        }
     }
     Ok(Json(server.db.get(id)?.ok_or_else(not_found)?))
 }
@@ -534,9 +612,11 @@ async fn queue(
     Json(body): Json<QueueBody>,
 ) -> Result<Json<Feedback>> {
     server.db.get(id)?.ok_or_else(not_found)?;
+    let new = body.new_run()?;
+    server.validate_run(&new)?;
     server
         .db
-        .create_run(id, &body.new_run()?, &author(body.author.clone()))?
+        .create_run(id, &new, &author(body.author.clone()))?
         .map_err(|run| conflict(format!("#{id} already has active run #{run}")))?;
     Ok(Json(server.db.get(id)?.ok_or_else(not_found)?))
 }
@@ -611,12 +691,34 @@ async fn claim(State(server): State<Server>, Json(body): Json<ClaimBody>) -> Res
 async fn heartbeat(
     State(server): State<Server>,
     Json(mut status): Json<WorkerStatus>,
-) -> Result<StatusCode> {
+) -> Result<Json<serde_json::Value>> {
     status.name = clip(Some(status.name), 100).unwrap_or_else(|| "worker".into());
     status.last_seen = crate::db::now();
+    let refresh = server
+        .refresh_models
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&status.name);
     let mut workers = server.workers.lock().unwrap_or_else(|p| p.into_inner());
     workers.insert(status.name.clone(), status);
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(json!({ "refresh_models": refresh })))
+}
+
+/// Asks every known worker to re-read its agents' model lists.
+async fn refresh_workers(State(server): State<Server>) -> StatusCode {
+    let names: Vec<String> = server
+        .workers
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .keys()
+        .cloned()
+        .collect();
+    server
+        .refresh_models
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .extend(names);
+    StatusCode::ACCEPTED
 }
 
 async fn list_workers(State(server): State<Server>) -> Json<Vec<WorkerStatus>> {
@@ -639,6 +741,7 @@ async fn create_runs(
         return Err(bad_request("select between 1 and 100 items"));
     }
     let new = body.run.new_run()?;
+    server.validate_run(&new)?;
     let author = author(body.run.author.clone());
     let mut created = Vec::new();
     let mut skipped = Vec::new();
@@ -713,6 +816,8 @@ async fn run_events(
 }
 
 const MAX_EVENT_CHARS: usize = 8000;
+/// The prompt a run started with, kept whole so the owner can see what the agent was told.
+const MAX_PROMPT_CHARS: usize = 100_000;
 
 #[derive(Deserialize)]
 struct NewRunEvent {
@@ -733,8 +838,13 @@ async fn add_run_events(
         .into_iter()
         .map(|e| {
             let mut body = e.body;
-            if body.chars().count() > MAX_EVENT_CHARS {
-                body = body.chars().take(MAX_EVENT_CHARS).collect::<String>() + "…";
+            let max = if e.kind == "prompt" {
+                MAX_PROMPT_CHARS
+            } else {
+                MAX_EVENT_CHARS
+            };
+            if body.chars().count() > max {
+                body = body.chars().take(max).collect::<String>() + "…";
             }
             (e.kind.chars().take(32).collect(), body)
         })
@@ -1153,17 +1263,128 @@ mod tests {
             "the other run is still queued"
         );
 
-        let (status, _) = send(
+        let heartbeat = json!({"name": "w", "agents": [{"name": "claude", "efforts": ["low", "high"], "live_steering": true,
+            "models": [{"id": "opus", "name": "Opus 5.5", "description": null, "efforts": ["low", "high", "max"], "default_effort": null},
+                       {"id": "haiku-old", "name": "Haiku 4.5", "description": null, "efforts": [], "default_effort": null}]}],
+            "running": [run_id], "max_parallel": 2});
+        let (status, reply) = send(
             &router,
             "POST",
             "/api/worker/heartbeat",
-            json!({"name": "w", "agents": [{"name": "claude", "models": ["opus"], "efforts": ["high"], "live_steering": true}], "running": [run_id], "max_parallel": 2}),
+            heartbeat.clone(),
             &[AUTH],
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reply["refresh_models"], false);
         let (_, workers) = send(&router, "GET", "/api/workers", json!(null), &[AUTH]).await;
-        assert_eq!(workers[0]["agents"][0]["models"][0], "opus");
+        assert_eq!(workers[0]["agents"][0]["models"][0]["id"], "opus");
+        send(&router, "POST", "/api/workers/refresh", json!({}), &[AUTH]).await;
+        let (_, reply) = send(&router, "POST", "/api/worker/heartbeat", heartbeat, &[AUTH]).await;
+        assert_eq!(
+            reply["refresh_models"], true,
+            "refresh is handed to the worker once"
+        );
+
+        // With a worker online, only the models and efforts it reports are accepted.
+        let queue = |model: &str, effort: Option<&str>| json!({"ids": [ids[1]], "agent": "claude", "model": model, "effort": effort});
+        let (_, run2) = send(
+            &router,
+            "GET",
+            "/api/runs?active=true",
+            json!(null),
+            &[AUTH],
+        )
+        .await;
+        let queued = run2
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["status"] == "queued")
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        send(
+            &router,
+            "POST",
+            &format!("/api/runs/{queued}/commands"),
+            json!({"kind": "stop"}),
+            &[AUTH],
+        )
+        .await;
+        for (model, effort, ok) in [
+            ("sonnet", None, false),
+            ("opus", Some("ultra"), false),
+            ("haiku-old", Some("low"), false),
+            ("opus", Some("max"), true),
+        ] {
+            let (status, _) =
+                send(&router, "POST", "/api/runs", queue(model, effort), &[AUTH]).await;
+            assert_eq!(status == StatusCode::OK, ok, "{model} {effort:?}");
+        }
+        let (status, _) = send(
+            &router,
+            "POST",
+            "/api/runs",
+            json!({"ids": [ids[0]], "agent": "hermes", "model": "anthropic/claude-sonnet-5"}),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "hermes must not run Claude models"
+        );
+    }
+
+    #[tokio::test]
+    async fn edits_feedback_and_keeps_history() {
+        let (router, _dir) = test_server();
+        let shot = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(PNG)
+        );
+        let (_, body) = send(
+            &router,
+            "POST",
+            "/api/feedback",
+            json!({"app": "demo", "message": "Typo here", "screenshots": [shot]}),
+            &[],
+        )
+        .await;
+        let id = body["id"].as_i64().unwrap();
+        let (status, item) = send(
+            &router,
+            "PATCH",
+            &format!("/api/feedback/{id}"),
+            json!({"message": "Typo in the header", "kind": "idea", "screenshot_notes": [{"idx": 0, "note": "Top left"}]}),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(item["message"], "Typo in the header");
+        assert_eq!(item["status"], "open", "editing doesn't change status");
+        let (_, detail) = send(
+            &router,
+            "GET",
+            &format!("/api/feedback/{id}"),
+            json!(null),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(detail["screenshots"][0]["note"], "Top left");
+        let edited = &detail["events"][0];
+        assert_eq!(edited["kind"], "edited");
+        assert!(edited["body"].as_str().unwrap().contains("> Typo here"));
+        let (status, _) = send(
+            &router,
+            "PATCH",
+            &format!("/api/feedback/{id}"),
+            json!({"kind": "nope"}),
+            &[AUTH],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

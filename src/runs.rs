@@ -120,14 +120,76 @@ pub struct Command {
     pub author: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelInfo {
+    /// What the CLI accepts, e.g. `opus` or `gpt-6-sol`.
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// Reasoning efforts this model supports (empty: no effort setting).
+    pub efforts: Vec<String>,
+    pub default_effort: Option<String>,
+}
+
 /// What a worker can run, reported with its heartbeat so the UI can offer it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentInfo {
     pub name: String,
-    pub models: Vec<String>,
+    /// Selectable models as discovered from the CLI (empty: unknown, use the default).
+    #[serde(default)]
+    pub models: Vec<ModelInfo>,
+    /// Efforts valid for the agent's default model.
+    #[serde(default)]
     pub efforts: Vec<String>,
+    /// Label of the model used when none is chosen, e.g. "Opus 5.5".
+    #[serde(default)]
+    pub default_model: Option<String>,
+    /// Why models could not be discovered.
+    #[serde(default)]
+    pub models_error: Option<String>,
     /// Messages reach the agent mid-turn instead of after the current turn.
     pub live_steering: bool,
+}
+
+impl AgentInfo {
+    /// Checks a model/effort choice against what this agent reported.
+    pub fn validate(&self, model: Option<&str>, effort: Option<&str>) -> Result<(), String> {
+        let efforts = match model {
+            Some(model) if !self.models.is_empty() => {
+                let Some(info) = self.models.iter().find(|m| m.id == model) else {
+                    return Err(format!(
+                        "{} does not offer model {model:?} (available: {})",
+                        self.name,
+                        self.models
+                            .iter()
+                            .map(|m| m.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                };
+                if info.efforts.is_empty() && effort.is_some() {
+                    return Err(format!(
+                        "{} model {model:?} has no reasoning effort setting",
+                        self.name
+                    ));
+                }
+                &info.efforts
+            }
+            Some(_) => return Ok(()),
+            None => &self.efforts,
+        };
+        match effort {
+            Some(effort) if !efforts.is_empty() && !efforts.iter().any(|e| e == effort) => {
+                Err(format!(
+                    "effort {effort:?} is not available for {} {} (available: {})",
+                    self.name,
+                    model.unwrap_or("default model"),
+                    efforts.join(", ")
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

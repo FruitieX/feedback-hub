@@ -16,8 +16,8 @@ include_open = false             # true = also start agents on new, un-queued fe
 # Built-in agents: claude, codex, hermes. Tune them or add others.
 # [agents.claude]
 # max_parallel = 1                       # e.g. to stay within subscription limits
-# models = ["fable", "opus", "sonnet"]   # suggestions in the UI (any model can be typed)
-# efforts = ["low", "medium", "high", "xhigh", "max"]
+# models = ["opus", "sonnet"]            # pin the offered models (default: ask the CLI)
+# efforts = ["low", "medium", "high"]    # efforts for pinned models
 # args = ["--fallback-model", "sonnet"]  # extra CLI arguments
 # program = "/path/to/claude"
 #

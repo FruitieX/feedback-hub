@@ -1,0 +1,85 @@
+// Admin API client. The token lives in localStorage so the triage UI stays signed in.
+
+const TOKEN_KEY = 'feedbackHub.token';
+
+export const storage = (() => {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+})();
+
+let token = storage?.getItem(TOKEN_KEY) ?? '';
+const listeners = new Set<() => void>();
+
+export const getToken = () => token;
+
+export function setToken(value: string) {
+  token = value;
+  if (value) storage?.setItem(TOKEN_KEY, value);
+  else storage?.removeItem(TOKEN_KEY);
+  for (const listener of listeners) listener();
+}
+
+export function onTokenChange(listener: () => void) {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...init.headers },
+  });
+  if (response.status === 401) {
+    setToken('');
+    throw new Error('Signed out: the token was not accepted');
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error ?? `HTTP ${response.status}`);
+  }
+  const text = await response.text();
+  return (text ? JSON.parse(text) : undefined) as T;
+}
+
+export const post = <T>(path: string, body: unknown) => api<T>(path, { method: 'POST', body: JSON.stringify(body) });
+export const patch = <T>(path: string, body: unknown) => api<T>(path, { method: 'PATCH', body: JSON.stringify(body) });
+
+const imageCache = new Map<string, Promise<string>>();
+
+/** Screenshots need the token, so they are fetched and shown as blob URLs. */
+export function screenshotUrl(id: number, idx: number) {
+  const key = `${id}/${idx}`;
+  if (!imageCache.has(key)) {
+    imageCache.set(
+      key,
+      fetch(`/api/feedback/${id}/screenshots/${idx}`, { headers: { authorization: `Bearer ${token}` } })
+        .then((r) => r.blob())
+        .then((b) => URL.createObjectURL(b)),
+    );
+  }
+  return imageCache.get(key)!;
+}
+
+export function ago(iso: string) {
+  const seconds = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (seconds < 60) return 'just now';
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)} h ago`;
+  return `${Math.round(seconds / 86400)} d ago`;
+}
+
+export function duration(from: string | null, to: string | null) {
+  if (!from) return '';
+  const seconds = Math.max(0, ((to ? new Date(to) : new Date()).getTime() - new Date(from).getTime()) / 1000);
+  if (seconds < 60) return `${Math.round(seconds)} s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min`;
+  return `${Math.floor(seconds / 3600)} h ${Math.round((seconds % 3600) / 60)} min`;
+}
+
+export const clock = (iso: string) =>
+  new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });

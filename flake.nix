@@ -10,7 +10,7 @@
         pname = "feedback-hub-web"; version = "0.1.0";
         src = pkgs.lib.cleanSourceWith { src = ./web; filter = path: type: !(builtins.elem (baseNameOf path) [ "node_modules" "dist" ]); };
         nodejs = pkgs.nodejs_22;
-        npmDepsHash = "sha256-Xuw7z+/wKGctZ2LZ2s/x7HBBB3TL5B+1LmCClpBN7P0=";
+        npmDepsHash = "sha256-Q2thJPZYyVxTyHfA5V9ddJ/gDNZJRm/9nH2x5IKPLYY=";
         env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
         installPhase = ''mkdir -p $out/share/feedback-hub; cp -r dist/. $out/share/feedback-hub/'';
       };

@@ -157,42 +157,69 @@ try {
   await probe.close();
   if (!(pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60)) fail(`WebGL canvas missing from snapshot: rgba(${pixel})`);
 
+  // A worker announces what its CLIs offer; the pickers only show these.
+  const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+  const post = (path, body) => fetch(`${hub}${path}`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
+  const model = (id, name, efforts, default_effort = null) => ({ id, name, description: null, efforts, default_effort });
+  await post('/api/worker/heartbeat', {
+    name: 'e2e-box',
+    agents: [
+      { name: 'claude', live_steering: true, default_model: 'Opus 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        models: [model('opus', 'Opus 5.5', ['low', 'medium', 'high', 'xhigh', 'max']), model('claude-haiku-4-5', 'Haiku 4.5', [])] },
+      { name: 'codex', live_steering: false, default_model: 'GPT-6-Sol', efforts: ['low', 'medium', 'high'],
+        models: [model('gpt-6-sol', 'GPT-6-Sol', ['low', 'medium', 'high', 'ultra'], 'medium')] },
+    ],
+    running: [],
+    max_parallel: 2,
+  });
+
   // Triage UI.
+  const pick = async (page, scope, label, option) => {
+    await page.click(`${scope} [data-select="${label}"]`);
+    await page.getByRole('option', { name: option, exact: true }).click();
+  };
   const context = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   const triage = await context.newPage();
+  const uiErrors = [];
+  triage.on('pageerror', (e) => uiErrors.push(String(e)));
   await triage.goto(hub);
   await triage.fill('input[name=token]', token);
   await triage.click('button.primary');
   await triage.locator('.item').first().click();
   await triage.locator('.gallery img[src^="blob:"]').first().waitFor();
-  await triage.selectOption('.queue select', 'codex');
-  await triage.click('.queue button');
-  await triage.locator('.detail .pill.queued').waitFor();
+
+  // Edit the report.
+  await triage.click('[data-edit]');
+  await triage.fill('.dialog textarea[name=message]', 'Save button does nothing (edited)');
+  await triage.click('.dialog .button.primary');
+  await triage.locator('.message', { hasText: '(edited)' }).waitFor();
+
+  // Queue it for Codex with a model and an effort only that model offers.
+  await pick(triage, '.queue', 'Agent', 'codex');
+  await pick(triage, '.queue', 'Model', 'GPT-6-Sol');
+  await triage.click('.queue [data-select="Reasoning effort"]');
+  await triage.screenshot({ path: `${out}/triage-picker.png` });
+  await triage.getByRole('option', { name: 'ultra' }).click();
+  await triage.click('[data-queue]');
+  await triage.locator('.agent-card.active').waitFor();
   await triage.screenshot({ path: `${out}/triage-desktop.png` });
 
-  // Bulk: tick the other item and send it to Claude with a model and effort.
-  await triage.locator('.entry:has(.pill.open) input[type=checkbox]').check();
+  // Bulk: tick the other item and send it to Claude.
+  await triage.locator('.entry:has(.pill.open) [data-check]').click();
   await triage.locator('.bulk').waitFor();
-  await triage.selectOption('.bulk [name=agent]', 'claude');
-  await triage.fill('.bulk [name=model]', 'opus');
-  await triage.selectOption('.bulk [name=effort]', 'high');
-  await triage.fill('.bulk [name=note]', 'Keep the fix small');
+  await pick(triage, '.bulk', 'Agent', 'claude');
+  await pick(triage, '.bulk', 'Model', 'Opus 5.5');
+  await pick(triage, '.bulk', 'Reasoning effort', 'high');
+  await triage.fill('.bulk textarea[name=note]', 'Keep the fix small');
   await triage.screenshot({ path: `${out}/triage-bulk.png` });
-  await triage.click('.bulk button.primary');
+  await triage.click('[data-bulk-send]');
   await triage.locator('.bulk').waitFor({ state: 'detached' });
 
-  // Play the worker: heartbeat, claim the bulk run, stream some activity.
-  const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
-  const post = (path, body) => fetch(`${hub}${path}`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
-  await post('/api/worker/heartbeat', {
-    name: 'e2e-box',
-    agents: [{ name: 'claude', models: ['opus', 'sonnet'], efforts: ['low', 'high'], live_steering: true }],
-    running: [],
-    max_parallel: 2,
-  });
+  // Play the worker: claim the bulk run and stream some activity.
   const run = await (await post('/api/worker/claim-run', { worker: 'e2e-box', agents: ['claude'], defaultAgent: 'claude' })).json();
   if (run.model !== 'opus' || run.effort !== 'high' || run.note !== 'Keep the fix small') fail(`unexpected run ${JSON.stringify(run)}`);
   await post(`/api/runs/${run.id}/events`, [
+    { kind: 'prompt', body: 'You have been dispatched by feedback-hub…' },
     { kind: 'system', body: 'Model: claude-opus' },
     { kind: 'text', body: 'Looking at the save handler first.' },
     { kind: 'tool', body: 'Bash: rg -n "save" src' },
@@ -202,8 +229,8 @@ try {
   await triage.click('[data-view=agents]');
   await triage.locator(`.run-item[data-run="${run.id}"]`).click();
   await triage.locator('.ev.tool').waitFor();
-  await triage.fill('.steer textarea', 'Also check the mobile layout');
-  await triage.click('.steer button.primary');
+  await triage.fill('.composer textarea', 'Also check the mobile layout');
+  await triage.click('[data-send]');
   await triage.locator('.ev.user', { hasText: 'mobile layout' }).waitFor();
   const commands = await (await post(`/api/runs/${run.id}/commands/take`, {})).json();
   if (commands[0]?.body !== 'Also check the mobile layout') fail(`steering message not delivered: ${JSON.stringify(commands)}`);
@@ -213,7 +240,9 @@ try {
   await triage.setViewportSize({ width: 390, height: 844 });
   await triage.screenshot({ path: `${out}/agents-mobile.png` });
   await triage.click('[data-view=feedback]');
+  await triage.click('.back');
   await triage.screenshot({ path: `${out}/triage-mobile.png`, fullPage: true });
+  if (uiErrors.length) fail(`triage UI errors: ${uiErrors.join('\n')}`);
   await context.close();
   console.log('e2e ok');
 } finally {

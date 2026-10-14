@@ -56,9 +56,9 @@ pub struct AgentConfig {
     /// Extra arguments for the built-in kinds.
     #[serde(default)]
     pub args: Vec<String>,
-    /// Models offered in the UI (any other value can still be typed in).
+    /// Fixed list of models to offer instead of asking the CLI which it has.
     pub models: Option<Vec<String>>,
-    /// Reasoning effort levels offered in the UI.
+    /// Reasoning efforts for a fixed `models` list or a `command` agent.
     pub efforts: Option<Vec<String>>,
     /// How many runs of this agent may run at once on this worker.
     pub max_parallel: Option<usize>,
@@ -74,17 +74,6 @@ impl AgentConfig {
             (None, None) if BUILTIN_AGENTS.contains(&name) => name.into(),
             (None, None) => "command".into(),
         }
-    }
-
-    pub fn models(&self, kind: &str) -> Vec<String> {
-        let defaults: &[&str] = match kind {
-            "claude" => &["fable", "opus", "sonnet", "haiku"],
-            "codex" => &["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol"],
-            _ => &[],
-        };
-        self.models
-            .clone()
-            .unwrap_or_else(|| defaults.iter().map(|s| s.to_string()).collect())
     }
 
     pub fn efforts(&self, kind: &str) -> Vec<String> {

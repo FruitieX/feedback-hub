@@ -12,9 +12,10 @@ can pick it up and fix things.
   requests.
 - **Server** (`feedback-hub serve`): Rust + SQLite. Anonymous `POST
   /api/feedback` for apps (origin-checked), everything else behind an admin
-  token. Serves the widget and the triage UI at `/`: browse feedback, tick
-  items and send them to an agent with a chosen model and reasoning effort,
-  and (under **Agents**) watch runs live, steer, stop or continue them.
+  token. Serves the widget and the triage UI at `/` (React + Radix UI, in
+  `web/src/triage/`): browse and edit feedback, tick items and send them to an
+  agent with a model and reasoning effort it actually offers, and (under
+  **Agents**) watch runs live, steer, stop or continue them.
 - **CLI** (`feedback-hub list|show|comment|status|queue|runs|run|steer|stop|apps|prompt`):
   how humans and agents read and update feedback and runs.
 - **Worker** (`feedback-hub worker`): claims queued runs and executes Claude
@@ -82,9 +83,23 @@ prompt containing the report and instructions to fix, verify, commit/push (per
 without resolving, the item returns to `open`. Clean worktrees are removed.
 
 The worker only talks to the hub (outbound): it streams the agent's activity
-(messages, tool calls, results) to the run, polls for commands every couple of
-seconds, and sends a heartbeat listing the agents, models and efforts it
-offers, which the UI uses for its pickers.
+(messages, tool calls, results, and the prompt it started with) to the run,
+polls for commands every couple of seconds, and sends a heartbeat listing the
+agents it offers.
+
+Models and the reasoning efforts each model supports are read from the CLIs
+themselves, at startup, every 30 minutes, and when the UI's refresh button is
+pressed: Claude Code's stream-json `initialize` request (no model call), Codex's
+`app-server` `model/list`, and Hermes' provider model cache (Codex efforts for
+`openai-codex` models). The UI only offers those, and the hub rejects other
+choices while a worker is online. `[agents.<name>] models = [...]` pins a list
+instead.
+
+Each run starts with a prompt containing the full report (message,
+screenshots, logs, the item's timeline including comments) and how to work:
+follow the repo's AGENTS.md, fix and verify, deliver per `delivery`, then mark
+the item resolved with `feedback-hub status` (or back to `open` with a question
+if it can't proceed). The UI's instructions field is added to that prompt.
 
 | Agent | Started as | Steering |
 |---|---|---|
@@ -95,7 +110,8 @@ offers, which the UI uses for its pickers.
 A message to a finished run requeues it on the same worker and resumes the
 agent session there. Claude Code is only ever driven through the official
 `claude` CLI with the local login (no API calls, no token reuse), so it works
-with a subscription; keep `max_parallel`/`[agents.claude] max_parallel` modest
+with a subscription. Hermes is refused Claude models and the `anthropic`
+provider, because Hermes calls the API with Claude Code's stored login; keep `max_parallel`/`[agents.claude] max_parallel` modest
 to stay within its usage limits. Any other CLI can be added with
 `kind = "command"` (plain output, no steering) — see `config.example.toml`.
 

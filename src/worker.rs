@@ -11,6 +11,7 @@ use crate::{
     apps::AppInfo,
     client::{Client, Detail, find_app, render_markdown},
     config::{ClientConfig, expand_home, home},
+    models::{self, Discovered},
     runs::{AgentInfo, Run, RunUpdate, WorkerStatus},
 };
 use anyhow::{Context, Result, bail};
@@ -30,7 +31,12 @@ pub struct Worker {
     name: String,
     /// Run id → agent name of the runs executing on this worker.
     active: Mutex<HashMap<i64, String>>,
+    /// Agent name → models it offers (or why they could not be listed).
+    catalog: Mutex<HashMap<String, std::result::Result<Discovered, String>>>,
 }
+
+/// How often the model lists are re-read from the CLIs.
+const CATALOG_REFRESH: Duration = Duration::from_secs(30 * 60);
 
 struct Workspace {
     repo: PathBuf,
@@ -250,7 +256,46 @@ impl Worker {
             client,
             name,
             active: Mutex::default(),
+            catalog: Mutex::default(),
         })
+    }
+
+    /// Asks each enabled agent's CLI which models and efforts it offers.
+    fn refresh_catalog(&self) {
+        let agents = self.config.agents();
+        let mut found: HashMap<String, std::result::Result<Discovered, String>> = HashMap::new();
+        let mut codex_models = Vec::new();
+        // Codex first: Hermes reuses its per-model efforts for openai-codex models.
+        let mut names = self.enabled_agents();
+        names.sort_by_key(|n| agents[n].kind(n) != "codex");
+        for name in names {
+            let agent = &agents[&name];
+            let kind = agent.kind(&name);
+            let program = agent.program.clone().unwrap_or_else(|| kind.clone());
+            let result = match models::configured(agent, &kind) {
+                Some(fixed) => Ok(fixed),
+                None => match kind.as_str() {
+                    "claude" => models::claude(&program),
+                    "codex" => models::codex(&program),
+                    "hermes" => models::hermes(&home(), &codex_models),
+                    _ => Ok(Discovered {
+                        default_model: None,
+                        default_efforts: agent.efforts(&kind),
+                        models: vec![],
+                    }),
+                },
+            };
+            if kind == "codex"
+                && let Ok(d) = &result
+            {
+                codex_models = d.models.clone();
+            }
+            if let Err(err) = &result {
+                eprintln!("could not list models for {name}: {err:#}");
+            }
+            found.insert(name, result.map_err(|e| format!("{e:#}")));
+        }
+        *self.catalog.lock().unwrap_or_else(|p| p.into_inner()) = found;
     }
 
     fn enabled_agents(&self) -> Vec<String> {
@@ -309,8 +354,10 @@ impl Worker {
             .collect()
     }
 
-    fn heartbeat(&self) -> Result<()> {
+    /// Reports liveness and capabilities; returns whether the hub asked for fresh model lists.
+    fn heartbeat(&self) -> Result<bool> {
         let agents = self.config.agents();
+        let catalog = self.catalog.lock().unwrap_or_else(|p| p.into_inner());
         let status = WorkerStatus {
             name: self.name.clone(),
             agents: self
@@ -319,9 +366,21 @@ impl Worker {
                 .map(|name| {
                     let config = &agents[&name];
                     let kind = config.kind(&name);
+                    let (models, efforts, default_model, models_error) = match catalog.get(&name) {
+                        Some(Ok(d)) => (
+                            d.models.clone(),
+                            d.default_efforts.clone(),
+                            d.default_model.clone(),
+                            None,
+                        ),
+                        Some(Err(err)) => (vec![], vec![], None, Some(err.clone())),
+                        None => (vec![], vec![], None, None),
+                    };
                     AgentInfo {
-                        models: config.models(&kind),
-                        efforts: config.efforts(&kind),
+                        models,
+                        efforts,
+                        default_model,
+                        models_error,
                         live_steering: kind == "claude",
                         name,
                     }
@@ -331,6 +390,7 @@ impl Worker {
             max_parallel: self.max_parallel(),
             last_seen: String::new(),
         };
+        drop(catalog);
         self.client.heartbeat(&status)
     }
 
@@ -385,9 +445,28 @@ impl Worker {
         }
         let mut handles = Vec::new();
         let mut started = 0;
+        let mut catalog_at: Option<Instant> = None;
+        let catalog_refreshing = Arc::new(std::sync::atomic::AtomicBool::new(false));
         loop {
-            if let Err(err) = self.heartbeat() {
-                eprintln!("heartbeat failed: {err:#}");
+            let refresh_requested = match self.heartbeat() {
+                Ok(requested) => requested,
+                Err(err) => {
+                    eprintln!("heartbeat failed: {err:#}");
+                    false
+                }
+            };
+            let stale = catalog_at.is_none_or(|at| at.elapsed() > CATALOG_REFRESH);
+            if (stale || refresh_requested)
+                && !catalog_refreshing.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                catalog_at = Some(Instant::now());
+                let worker = Arc::clone(&self);
+                let flag = Arc::clone(&catalog_refreshing);
+                std::thread::spawn(move || {
+                    worker.refresh_catalog();
+                    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    let _ = worker.heartbeat();
+                });
             }
             handles.retain(|h: &std::thread::JoinHandle<()>| !h.is_finished());
             let mut claimed = false;
@@ -584,6 +663,16 @@ impl Worker {
             .cloned()
             .with_context(|| format!("unknown agent {}", run.agent))?;
         let kind = agent.kind(&run.agent);
+        if kind == "hermes"
+            && run
+                .model
+                .as_deref()
+                .is_some_and(models::hermes_model_forbidden)
+        {
+            bail!(
+                "Hermes would call Claude models with the Claude subscription login outside the claude CLI; use the claude agent instead"
+            );
+        }
         let repo = self.repo_dir(&detail.feedback.app, app)?;
         let screenshots = self
             .client
@@ -628,6 +717,9 @@ impl Worker {
             )
         };
         if !resume {
+            let _ = self
+                .client
+                .add_run_events(run.id, &[("prompt".into(), input.clone())]);
             self.client.comment(
                 id,
                 &self.name,

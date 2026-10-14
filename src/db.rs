@@ -77,6 +77,14 @@ pub struct NewScreenshot {
 }
 
 #[derive(Default)]
+pub struct FeedbackEdit {
+    pub message: Option<String>,
+    pub kind: Option<String>,
+    /// Screenshot index → new note (`None` clears it).
+    pub screenshot_notes: Vec<(i64, Option<String>)>,
+}
+
+#[derive(Default)]
 pub struct ListFilter {
     pub statuses: Vec<String>,
     pub app: Option<String>,
@@ -360,6 +368,55 @@ impl Database {
             body.push_str(note.trim());
         }
         Self::add_event_tx(conn, id, author, "status", &body)
+    }
+
+    /// Edits the report itself; the previous text is kept on the timeline.
+    pub fn edit(&self, id: i64, edit: &FeedbackEdit, author: &str) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let (message, kind): (String, String) = tx.query_row(
+            "SELECT message, kind FROM feedback WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let mut changes = Vec::new();
+        if let Some(new) = edit.message.as_deref().filter(|m| *m != message) {
+            tx.execute(
+                "UPDATE feedback SET message = ?2 WHERE id = ?1",
+                params![id, new],
+            )?;
+            let previous = if message.is_empty() {
+                "(empty)".to_string()
+            } else {
+                message
+                    .lines()
+                    .map(|l| format!("> {l}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            changes.push(format!("Edited the message. Previously:\n{previous}"));
+        }
+        if let Some(new) = edit.kind.as_deref().filter(|k| *k != kind) {
+            tx.execute(
+                "UPDATE feedback SET kind = ?2 WHERE id = ?1",
+                params![id, new],
+            )?;
+            changes.push(format!("Changed kind {kind} → {new}"));
+        }
+        for (idx, note) in &edit.screenshot_notes {
+            let updated = tx.execute(
+                "UPDATE screenshots SET note = ?3 WHERE feedback_id = ?1 AND idx = ?2 AND note IS NOT ?3",
+                params![id, idx, note],
+            )?;
+            if updated > 0 {
+                changes.push(format!("Edited the note on screenshot #{}", idx + 1));
+            }
+        }
+        if !changes.is_empty() {
+            Self::add_event_tx(&tx, id, author, "edited", &changes.join("\n\n"))?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn delete(&self, id: i64) -> Result<bool> {

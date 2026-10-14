@@ -184,13 +184,16 @@ impl Client {
         Ok(value.map(serde_json::from_value).transpose()?)
     }
 
-    pub fn heartbeat(&self, status: &WorkerStatus) -> Result<()> {
-        self.send(
+    /// Returns whether the hub asked this worker to refresh its model lists.
+    pub fn heartbeat(&self, status: &WorkerStatus) -> Result<bool> {
+        let reply = self.send(
             "POST",
             "/api/worker/heartbeat",
             serde_json::to_value(status)?,
         )?;
-        Ok(())
+        Ok(reply
+            .and_then(|r| r["refresh_models"].as_bool())
+            .unwrap_or(false))
     }
 
     pub fn runs(&self, active_only: bool, feedback: Option<i64>, limit: i64) -> Result<Vec<Run>> {
