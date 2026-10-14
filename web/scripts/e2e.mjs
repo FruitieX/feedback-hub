@@ -66,7 +66,7 @@ try {
     await tab.goto(`http://localhost:${appPort}/`);
     await tab.locator('.scroller').evaluate((el) => (el.scrollTop = 400));
     await tab.click('button.broken');
-    const widgetTab = tab.locator('feedback-hub-widget .tab');
+    const widgetTab = tab.locator('feedback-hub-widget .fab');
     await widgetTab.waitFor();
     await tab.screenshot({ path: `${out}/${name}-1-tab.png` });
     await widgetTab.click();
@@ -74,6 +74,17 @@ try {
     await panel.waitFor();
     await tab.locator('feedback-hub-widget .thumb img').waitFor();
     await tab.screenshot({ path: `${out}/${name}-2-panel.png` });
+
+    // "Page snapshot" hides the form; the next button press captures.
+    await tab.locator('feedback-hub-widget [data-add=page]').click();
+    await panel.waitFor({ state: 'detached' });
+    await tab.locator('feedback-hub-widget .fab.armed').waitFor();
+    await tab.locator('.scroller').evaluate((el) => (el.scrollTop = 900));
+    await tab.screenshot({ path: `${out}/${name}-2b-armed.png` });
+    await tab.locator('feedback-hub-widget .fab').click();
+    await panel.waitFor();
+    if ((await tab.locator('feedback-hub-widget .shot').count()) !== 2) fail('second snapshot missing');
+    await tab.locator('feedback-hub-widget .remove').nth(1).click();
 
     // Circle something on the screenshot.
     await tab.locator('feedback-hub-widget .thumb').click();

@@ -1,9 +1,9 @@
-// Feedback widget: a small edge tab that opens a feedback form with annotated
+// Feedback widget: a small corner button that opens a feedback form with annotated
 // screenshots. Injected into private app pages (by the gateway or a script tag):
 //
 //   <script async src="https://feedback.example.org/widget.js" data-app="myapp"></script>
 //
-// Optional data attributes: data-position="left|right", data-top="60%",
+// Optional data attributes: data-position="left|right" (bottom corner),
 // data-version="1.2.3", data-label="Feedback".
 // Apps can call window.FeedbackHub.open(), .setContext({...}), .setReporter(name).
 
@@ -161,6 +161,8 @@ function readFile(file: Blob): Promise<string> {
 
 // --- Widget ----------------------------------------------------------------
 
+const ICON_CAMERA =
+  '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M9 4h6l1.5 2H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3.5L9 4zm3 4.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zm0 2a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z"/></svg>';
 const ICON_CHAT =
   '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 4v-4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm3 5v2h10V9H7zm0 4v2h7v-2H7z"/></svg>';
 
@@ -176,11 +178,13 @@ class Widget {
   private message = '';
   private includeDiagnostics = true;
   private busy = false;
+  /** Set by "Page snapshot": the next button press captures instead of opening. */
+  private armed = false;
 
   constructor(
     private hub: string,
     private app: string,
-    private options: { position: 'left' | 'right'; top: string; label: string; version?: string },
+    private options: { position: 'left' | 'right'; label: string; version?: string },
   ) {
     this.host = document.createElement('feedback-hub-widget');
     this.host.style.cssText = 'all: initial; position: fixed; z-index: 2147483600; top: 0; left: 0; width: 0; height: 0;';
@@ -189,11 +193,11 @@ class Widget {
     style.textContent = WIDGET_CSS;
     this.root.append(style);
     this.tab = document.createElement('button');
-    this.tab.className = `tab ${options.position}`;
-    this.tab.style.top = options.top;
+    this.tab.className = `fab ${options.position}`;
     this.tab.type = 'button';
-    this.tab.title = 'Send feedback about this app';
-    this.tab.innerHTML = `${ICON_CHAT}<span>${options.label}</span>`;
+    this.tab.title = options.label;
+    this.tab.setAttribute('aria-label', options.label);
+    this.tab.innerHTML = `${ICON_CHAT}<span class="label"></span>`;
     this.tab.addEventListener('click', () => void this.open());
     this.root.append(this.tab);
     if (safeStorage('session')?.getItem(STORAGE_HIDDEN) === '1') this.tab.hidden = true;
@@ -271,16 +275,27 @@ class Widget {
     return () => el.remove();
   }
 
+  private setArmed(armed: boolean) {
+    this.armed = armed;
+    this.tab.classList.toggle('armed', armed);
+    this.tab.title = armed ? 'Capture this page for your feedback' : this.options.label;
+    this.tab.innerHTML = `${armed ? ICON_CAMERA : ICON_CHAT}<span class="label">${armed ? 'Capture' : ''}</span>`;
+    if (armed) this.tab.hidden = false;
+  }
+
   async open() {
     if (this.dialog || this.busy) return;
     this.busy = true;
-    if (this.shots.length === 0) {
+    if (this.armed || this.shots.length === 0) {
+      this.setArmed(false);
       this.tab.hidden = true;
       const done = this.toast('Capturing screenshot…');
       try {
         this.shots.push({ base: await this.snapshotPage(), strokes: [], output: null });
       } catch (error) {
         console.debug('feedback-hub: page snapshot failed', error);
+        const failed = this.toast('Could not capture the page; add an image instead.');
+        setTimeout(failed, 3000);
       } finally {
         done();
         this.tab.hidden = safeStorage('session')?.getItem(STORAGE_HIDDEN) === '1';
@@ -376,7 +391,7 @@ class Widget {
           <span>Include page address, device info and recent errors</span>
         </label>
         <footer>
-          <button type="button" class="link hide-tab">Hide tab for this session</button>
+          <button type="button" class="link hide-tab">Hide button for this session</button>
           <button type="submit" class="primary">Send</button>
         </footer>
       </form>`;
@@ -414,11 +429,17 @@ class Widget {
         }
       });
     }
-    form.querySelector('[data-add=page]')!.addEventListener('click', async () => {
-      dialog.hidden = true;
-      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      await this.addShot(() => this.snapshotPage(), status);
-      dialog.hidden = false;
+    form.querySelector('[data-add=page]')!.addEventListener('click', () => {
+      if (this.shots.length >= MAX_SHOTS) {
+        status.textContent = `At most ${MAX_SHOTS} screenshots.`;
+        return;
+      }
+      // Let the user get the page into the right state first; the next
+      // button press takes the snapshot and brings the form back.
+      this.close();
+      this.setArmed(true);
+      const done = this.toast('Set up the page, then tap Capture.');
+      setTimeout(done, 3000);
     });
     form.querySelector('[data-add=screen]')?.addEventListener('click', async () => {
       dialog.hidden = true;
@@ -559,7 +580,6 @@ function start() {
   const meta = document.querySelector<HTMLMetaElement>('meta[name="app-version"], meta[name="version"]');
   const widget = new Widget(hub, app, {
     position: data.position === 'left' ? 'left' : 'right',
-    top: data.top || '62%',
     label: data.label || 'Feedback',
     version: data.version || meta?.content || undefined,
   });

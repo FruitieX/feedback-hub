@@ -3,7 +3,7 @@
 In-app feedback for all my private apps, stored in one place so coding agents
 can pick it up and fix things.
 
-- **Widget** (`web/src/widget.ts`): a small "Feedback" edge tab. It snapshots the
+- **Widget** (`web/src/widget.ts`): a small, discreet corner button. It snapshots the
   page, lets the user circle/box/arrow things on one or more screenshots
   (page snapshot, real screen capture, or an uploaded/pasted image), and sends
   the report with page URL, device info, recent console errors and failed
@@ -38,7 +38,7 @@ Anywhere else, include the script directly:
 <script async src="https://feedback.fruitiex.org/widget.js" data-app="myapp"></script>
 ```
 
-Optional attributes: `data-position="left"`, `data-top="40%"`,
+Optional attributes: `data-position="left"` (bottom-left corner),
 `data-version="1.2.3"` (also read from `<meta name="app-version">`),
 `data-label`. JavaScript API once loaded (`feedbackhub:ready` event):
 `FeedbackHub.open()`, `.setContext({...})`, `.setReporter(name)`,
