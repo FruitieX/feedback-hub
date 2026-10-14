@@ -38,6 +38,25 @@ interface NetEntry {
   url: string;
 }
 
+/**
+ * WebGL canvases (maps, Pixi scenes…) are blank to toDataURL() after each frame
+ * unless created with preserveDrawingBuffer. The gateway injects this same patch
+ * inline at the top of <head> (see the homelab's widget-injection.lua) so it runs
+ * before the app creates its contexts; this copy covers script-tag installs.
+ * Keep the `__fhGl` flag in sync with that snippet.
+ */
+export function preserveWebGlBuffers() {
+  const w = window as unknown as { __fhGl?: number };
+  if (w.__fhGl) return;
+  w.__fhGl = 1;
+  const proto = HTMLCanvasElement.prototype;
+  const original = proto.getContext;
+  proto.getContext = function (this: HTMLCanvasElement, type: string, attrs?: unknown) {
+    if (/webgl/.test(type)) attrs = { ...(attrs as object), preserveDrawingBuffer: true };
+    return original.call(this, type, attrs as never);
+  } as typeof proto.getContext;
+}
+
 const MAX_SHOTS = 8;
 const MAX_IMAGE_SIDE = 2560;
 const STORAGE_REPORTER = 'feedbackHub.reporter';
@@ -587,6 +606,7 @@ function start() {
   window.dispatchEvent(new Event('feedbackhub:ready'));
 }
 
+preserveWebGlBuffers();
 installDiagnostics();
 if (document.body) start();
 else document.addEventListener('DOMContentLoaded', start, { once: true });

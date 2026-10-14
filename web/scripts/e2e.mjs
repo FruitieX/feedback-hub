@@ -28,12 +28,18 @@ const server = spawn(bin, ['serve'], {
   stdio: 'inherit',
 });
 
+// Must match the inline snippet in the homelab's widget-injection.lua.
+const EARLY_PATCH =
+  "(function(){var w=window,p=HTMLCanvasElement.prototype,g=p.getContext;if(w.__fhGl)return;w.__fhGl=1;p.getContext=function(t,a){if(/webgl/.test(t))a=Object.assign({},a,{preserveDrawingBuffer:true});return g.call(this,t,a)}})();";
 const page = `<!doctype html><html><head><meta name="viewport" content="width=device-width">
+<script>${EARLY_PATCH}</script>
 <title>Demo app</title><meta name="app-version" content="1.2.3">
 <script async src="${hub}/widget.js" data-app="demo"></script>
 <style>body{font-family:sans-serif;margin:0;background:#f0fdf4} .scroller{height:300px;overflow:auto;border:1px solid #ccc;margin:20px}
 .row{padding:12px;border-bottom:1px solid #ddd} button.broken{margin:20px;padding:12px 20px;background:#16a34a;color:#fff;border:0;border-radius:8px}</style></head>
 <body><h1 style="margin:20px">Demo app</h1><button class="broken" onclick="fetch('/missing');console.error('Save failed', new Error('boom'))">Save</button>
+<canvas id="gl" width="200" height="100" style="position:absolute;right:40px;top:40px"></canvas>
+<script>const gl=document.getElementById('gl').getContext('webgl');gl.clearColor(1,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);</script>
 <div class="scroller">${Array.from({ length: 40 }, (_, i) => `<div class="row">Row ${i + 1}</div>`).join('')}</div></body></html>`;
 const appServer = createServer((req, res) => {
   if (req.url === '/') {
@@ -123,6 +129,26 @@ try {
   if (!item.page_url?.startsWith('http://localhost:')) fail(`page url missing origin: ${item.page_url}`);
   if (!item.context.logs.some((l) => l.message.includes('Save failed'))) fail('console error not captured');
   if (!item.context.network.some((n) => n.status === '404')) fail('failed request not captured');
+
+  // WebGL content must survive the DOM snapshot (desktop: 1280px wide, 1x scale).
+  const desktop = list.find((i) => i.message.includes('(desktop)'));
+  const shot = await (
+    await fetch(`${hub}/api/feedback/${desktop.id}/screenshots/0`, { headers: { authorization: `Bearer ${token}` } })
+  ).arrayBuffer();
+  const probe = await browser.newPage();
+  const pixel = await probe.evaluate(async (b64) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${b64}`;
+    await img.decode();
+    const c = document.createElement('canvas');
+    c.width = img.width;
+    c.height = img.height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    return [...ctx.getImageData(1280 - 40 - 100, 40 + 50, 1, 1).data];
+  }, Buffer.from(shot).toString('base64'));
+  await probe.close();
+  if (!(pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60)) fail(`WebGL canvas missing from snapshot: rgba(${pixel})`);
 
   // Triage UI.
   const context = await browser.newContext({ viewport: { width: 1280, height: 860 } });
