@@ -1,13 +1,15 @@
 // Full-screen screenshot annotator: freehand pen, ovals, boxes and arrows.
 // Strokes are kept in image coordinates so a screenshot can be re-edited.
 
-export type Tool = 'pen' | 'ellipse' | 'rect' | 'arrow';
+export type Tool = 'pen' | 'ellipse' | 'rect' | 'arrow' | 'text';
 
 export interface Stroke {
   tool: Tool;
   color: string;
   width: number;
   points: [number, number][];
+  /** Label for the text tool. */
+  text?: string;
 }
 
 export interface Shot {
@@ -16,6 +18,8 @@ export interface Shot {
   strokes: Stroke[];
   /** Flattened screenshot with annotations, or null when unannotated. */
   output: string | null;
+  /** The reporter's caption for this screenshot. */
+  note: string;
 }
 
 /** Encodes a canvas compactly while keeping text legible. */
@@ -31,6 +35,7 @@ const TOOLS: [Tool, string, string][] = [
   ['ellipse', '◯', 'Circle'],
   ['rect', '▭', 'Box'],
   ['arrow', '➚', 'Arrow'],
+  ['text', 'T', 'Text'],
 ];
 
 export function drawStroke(ctx: CanvasRenderingContext2D, stroke: Stroke) {
@@ -46,6 +51,11 @@ export function drawStroke(ctx: CanvasRenderingContext2D, stroke: Stroke) {
   ctx.shadowBlur = stroke.width;
   const [x0, y0] = points[0];
   const [x1, y1] = points[points.length - 1];
+  if (stroke.tool === 'text') {
+    drawLabel(ctx, stroke, x0, y0);
+    ctx.restore();
+    return;
+  }
   ctx.beginPath();
   switch (stroke.tool) {
     case 'pen':
@@ -73,6 +83,26 @@ export function drawStroke(ctx: CanvasRenderingContext2D, stroke: Stroke) {
   }
   ctx.stroke();
   ctx.restore();
+}
+
+/** A filled label with readable text, anchored at its top-left corner. */
+function drawLabel(ctx: CanvasRenderingContext2D, stroke: Stroke, x: number, y: number) {
+  const size = stroke.width * 5;
+  const pad = size * 0.35;
+  ctx.shadowBlur = stroke.width;
+  ctx.font = `600 ${size}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
+  const lines = (stroke.text ?? '').split('\n');
+  const width = Math.max(...lines.map((l) => ctx.measureText(l).width)) + pad * 2;
+  const height = lines.length * size * 1.25 + pad * 1.2;
+  ctx.fillStyle = stroke.color;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, width, height, pad);
+  else ctx.rect(x, y, width, height);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = stroke.color === '#facc15' ? '#111827' : '#ffffff';
+  ctx.textBaseline = 'top';
+  lines.forEach((line, i) => ctx.fillText(line, x + pad, y + pad * 0.8 + i * size * 1.25));
 }
 
 export class Annotator {
@@ -149,7 +179,7 @@ export class Annotator {
     action('cancel', () => this.finish(null));
     action('done', () =>
       this.finish({
-        base: this.shot.base,
+        ...this.shot,
         strokes: this.strokes,
         output: this.strokes.length ? encodeCanvas(this.canvas) : null,
       }),
@@ -157,6 +187,10 @@ export class Annotator {
 
     this.canvas.addEventListener('pointerdown', (e) => {
       e.preventDefault();
+      if (this.tool === 'text') {
+        this.promptText(e);
+        return;
+      }
       this.canvas.setPointerCapture(e.pointerId);
       const width = Math.max(3, Math.round(Math.max(this.canvas.width, this.canvas.height) / 300));
       this.current = { tool: this.tool, color: this.color, width, points: [this.point(e)] };
@@ -186,6 +220,45 @@ export class Annotator {
         this.render();
       }
     });
+  }
+
+  /** Types a label at the tapped spot; Enter or leaving the field places it. */
+  private promptText(e: PointerEvent) {
+    this.overlay.querySelector('.text-entry')?.remove();
+    const at = this.point(e);
+    const color = this.color;
+    const width = Math.max(3, Math.round(Math.max(this.canvas.width, this.canvas.height) / 300));
+    const stage = this.overlay.querySelector<HTMLElement>('.stage')!;
+    const stageRect = stage.getBoundingClientRect();
+    const input = document.createElement('input');
+    input.className = 'text-entry';
+    input.placeholder = 'Type a label, Enter to place';
+    input.maxLength = 200;
+    input.style.left = `${Math.min(e.clientX - stageRect.left, stageRect.width - 220)}px`;
+    input.style.top = `${e.clientY - stageRect.top}px`;
+    input.style.borderColor = color;
+    let done = false;
+    const commit = () => {
+      if (done) return;
+      done = true;
+      const text = input.value.trim();
+      input.remove();
+      if (text) {
+        this.strokes.push({ tool: 'text', color, width, points: [at], text });
+        this.render();
+      }
+    };
+    input.addEventListener('keydown', (k) => {
+      k.stopPropagation();
+      if (k.key === 'Enter') commit();
+      if (k.key === 'Escape') {
+        done = true;
+        input.remove();
+      }
+    });
+    input.addEventListener('blur', commit);
+    stage.append(input);
+    setTimeout(() => input.focus(), 0);
   }
 
   private point(e: PointerEvent): [number, number] {

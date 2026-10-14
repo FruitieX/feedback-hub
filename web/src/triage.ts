@@ -20,7 +20,7 @@ interface Feedback {
   updated_at: string;
 }
 interface Detail extends Feedback {
-  screenshots: { idx: number; mime: string; size: number }[];
+  screenshots: { idx: number; mime: string; size: number; note: string | null }[];
   events: { id: number; at: string; author: string; kind: string; body: string }[];
 }
 interface AppInfo {
@@ -214,7 +214,10 @@ function renderDetail() {
       ${
         d.screenshots.length
           ? `<div class="gallery">${d.screenshots
-              .map((s) => `<a target="_blank" data-shot="${s.idx}"><img alt="Screenshot ${s.idx + 1}" data-shot-img="${s.idx}"></a>`)
+              .map(
+                (s) =>
+                  `<figure><a target="_blank" data-shot="${s.idx}"><img alt="Screenshot ${s.idx + 1}" data-shot-img="${s.idx}"></a><figcaption><strong>#${s.idx + 1}</strong>${s.note ? ` ${esc(s.note)}` : ''}</figcaption></figure>`,
+              )
               .join('')}</div>`
           : ''
       }

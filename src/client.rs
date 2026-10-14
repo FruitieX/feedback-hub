@@ -320,8 +320,18 @@ pub fn render_markdown(detail: &Detail, app: Option<&AppInfo>, screenshots: &[Pa
             out,
             "Red/colored marks were drawn by the reporter to highlight the problem.\n"
         );
-        for path in screenshots {
-            let _ = writeln!(out, "- {}", path.display());
+        let _ = writeln!(
+            out,
+            "The reporter may refer to them as #1, #2, … in the message.\n"
+        );
+        for (i, path) in screenshots.iter().enumerate() {
+            let note = detail
+                .screenshots
+                .get(i)
+                .and_then(|s| s.note.as_deref())
+                .map(|n| format!(" — reporter's note: \"{n}\""))
+                .unwrap_or_default();
+            let _ = writeln!(out, "- #{} {}{note}", i + 1, path.display());
         }
     } else if f.screenshot_count > 0 {
         let _ = writeln!(

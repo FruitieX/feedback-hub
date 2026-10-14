@@ -59,7 +59,6 @@ export function preserveWebGlBuffers() {
 
 const MAX_SHOTS = 8;
 const MAX_IMAGE_SIDE = 2560;
-const STORAGE_REPORTER = 'feedbackHub.reporter';
 const STORAGE_HIDDEN = 'feedbackHub.hidden';
 
 function safeStorage(kind: 'local' | 'session'): Storage | null {
@@ -193,7 +192,8 @@ class Widget {
   private shots: Shot[] = [];
   private kind: Kind = 'bug';
   private extraContext: Record<string, unknown> = {};
-  private reporter = safeStorage('local')?.getItem(STORAGE_REPORTER) ?? '';
+  /** Set by the host app via FeedbackHub.setReporter(); there is no form field. */
+  private reporter = '';
   private message = '';
   private includeDiagnostics = true;
   private busy = false;
@@ -310,7 +310,7 @@ class Widget {
       this.tab.hidden = true;
       const done = this.toast('Capturing screenshot…');
       try {
-        this.shots.push({ base: await this.snapshotPage(), strokes: [], output: null });
+        this.shots.push({ base: await this.snapshotPage(), strokes: [], output: null, note: '' });
       } catch (error) {
         console.debug('feedback-hub: page snapshot failed', error);
         const failed = this.toast('Could not capture the page; add an image instead.');
@@ -350,7 +350,7 @@ class Widget {
     status.textContent = 'Adding screenshot…';
     try {
       const base = await producer();
-      this.shots.push({ base, strokes: [], output: null });
+      this.shots.push({ base, strokes: [], output: null, note: '' });
       status.textContent = '';
       this.renderShots();
     } catch (error) {
@@ -387,7 +387,7 @@ class Widget {
         <textarea name="message" rows="4" placeholder="What happened, and what did you expect? Steps to reproduce help a lot."></textarea>
         <div class="shots-header">
           <span>Screenshots</span>
-          <span class="hint">Tap one to circle or mark things</span>
+          <span class="hint">Tap one to mark it · refer to them as #1, #2…</span>
         </div>
         <div class="shots"></div>
         <div class="add-row">
@@ -401,10 +401,6 @@ class Widget {
           <input type="file" accept="image/*" multiple hidden>
         </div>
         <p class="status" aria-live="polite"></p>
-        <label class="field">
-          <span>Your name <em>(optional)</em></span>
-          <input name="reporter" autocomplete="name" maxlength="100">
-        </label>
         <label class="check">
           <input type="checkbox" name="diagnostics">
           <span>Include page address, device info and recent errors</span>
@@ -420,15 +416,12 @@ class Widget {
 
     const form = dialog.querySelector('form')!;
     const textarea = form.querySelector('textarea')!;
-    const reporter = form.querySelector<HTMLInputElement>('input[name=reporter]')!;
     const diagnostics = form.querySelector<HTMLInputElement>('input[name=diagnostics]')!;
     const status = form.querySelector<HTMLElement>('.status')!;
     const fileInput = form.querySelector<HTMLInputElement>('input[type=file]')!;
     textarea.value = this.message;
-    reporter.value = this.reporter;
     diagnostics.checked = this.includeDiagnostics;
     textarea.addEventListener('input', () => (this.message = textarea.value));
-    reporter.addEventListener('input', () => (this.reporter = reporter.value));
     diagnostics.addEventListener('change', () => (this.includeDiagnostics = diagnostics.checked));
 
     dialog.addEventListener('click', (event) => {
@@ -505,10 +498,13 @@ class Widget {
       edit.className = 'thumb';
       edit.title = 'Draw on screenshot';
       edit.append(img);
+      const number = document.createElement('span');
+      number.className = 'number';
+      number.textContent = `#${index + 1}`;
       const badge = document.createElement('span');
       badge.className = 'badge';
       badge.textContent = shot.strokes.length ? '✎ marked' : '✎ mark';
-      edit.append(badge);
+      edit.append(number, badge);
       edit.addEventListener('click', () => this.annotate(index));
       const remove = document.createElement('button');
       remove.type = 'button';
@@ -519,7 +515,14 @@ class Widget {
         this.shots.splice(index, 1);
         this.renderShots();
       });
-      item.append(edit, remove);
+      const note = document.createElement('input');
+      note.className = 'note';
+      note.placeholder = `Note for #${index + 1}`;
+      note.maxLength = 1000;
+      note.value = shot.note;
+      note.setAttribute('aria-label', `Note for screenshot ${index + 1}`);
+      note.addEventListener('input', () => (shot.note = note.value));
+      item.append(edit, remove, note);
       container.append(item);
     });
   }
@@ -541,7 +544,6 @@ class Widget {
     }
     button.disabled = true;
     status.textContent = 'Sending…';
-    safeStorage('local')?.setItem(STORAGE_REPORTER, this.reporter.trim());
     const diagnostics = this.includeDiagnostics;
     const context: Record<string, unknown> = { ...this.extraContext };
     if (this.options.version) context.appVersion = this.options.version;
@@ -573,6 +575,7 @@ class Widget {
           source: 'web',
           context,
           screenshots: this.shots.map((s) => s.output ?? s.base),
+          screenshotNotes: this.shots.map((s) => s.note.trim() || null),
         }),
       });
       const body = await response.json().catch(() => ({}));

@@ -44,6 +44,8 @@ pub struct Screenshot {
     pub idx: i64,
     pub mime: String,
     pub size: i64,
+    /// The reporter's caption for this screenshot.
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -65,7 +67,13 @@ pub struct NewFeedback {
     pub user_agent: Option<String>,
     pub source: String,
     pub context: serde_json::Value,
-    pub screenshots: Vec<(String, Vec<u8>)>,
+    pub screenshots: Vec<NewScreenshot>,
+}
+
+pub struct NewScreenshot {
+    pub mime: String,
+    pub bytes: Vec<u8>,
+    pub note: Option<String>,
 }
 
 #[derive(Default)]
@@ -159,6 +167,12 @@ impl Database {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
+        // Added after the first deployment; older databases lack the column.
+        if let Err(err) = conn.execute("ALTER TABLE screenshots ADD COLUMN note TEXT", [])
+            && !err.to_string().contains("duplicate column")
+        {
+            return Err(err.into());
+        }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             screenshot_dir,
@@ -197,12 +211,12 @@ impl Database {
             ],
         )?;
         let id = tx.last_insert_rowid();
-        for (idx, (mime, bytes)) in new.screenshots.iter().enumerate() {
+        for (idx, shot) in new.screenshots.iter().enumerate() {
             let idx = idx as i64;
-            std::fs::write(self.screenshot_path(id, idx, mime), bytes)?;
+            std::fs::write(self.screenshot_path(id, idx, &shot.mime), &shot.bytes)?;
             tx.execute(
-                "INSERT INTO screenshots (feedback_id, idx, mime, size) VALUES (?1, ?2, ?3, ?4)",
-                params![id, idx, mime, bytes.len() as i64],
+                "INSERT INTO screenshots (feedback_id, idx, mime, size, note) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, idx, shot.mime, shot.bytes.len() as i64, shot.note],
             )?;
         }
         tx.commit()?;
@@ -243,13 +257,14 @@ impl Database {
     pub fn screenshots(&self, id: i64) -> Result<Vec<Screenshot>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT idx, mime, size FROM screenshots WHERE feedback_id = ?1 ORDER BY idx",
+            "SELECT idx, mime, size, note FROM screenshots WHERE feedback_id = ?1 ORDER BY idx",
         )?;
         let rows = stmt.query_map([id], |row| {
             Ok(Screenshot {
                 idx: row.get(0)?,
                 mime: row.get(1)?,
                 size: row.get(2)?,
+                note: row.get(3)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

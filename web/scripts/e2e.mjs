@@ -102,12 +102,17 @@ try {
     await tab.mouse.down();
     await tab.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.25, { steps: 5 });
     await tab.mouse.up();
+    await tab.locator('feedback-hub-widget [data-tool=text]').click();
+    await tab.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.6);
+    await tab.locator('feedback-hub-widget .text-entry').fill('Nothing happens here');
+    await tab.keyboard.press('Enter');
     await tab.screenshot({ path: `${out}/${name}-3-annotate.png` });
     await tab.locator('feedback-hub-widget [data-action=done]').click();
     await tab.locator('feedback-hub-widget .badge', { hasText: 'marked' }).waitFor();
 
-    await tab.locator('feedback-hub-widget textarea').fill(`Save button does nothing (${name})`);
-    await tab.locator('feedback-hub-widget input[name=reporter]').fill('Tester');
+    await tab.locator('feedback-hub-widget .shot .note').first().fill('Save does nothing');
+    await tab.screenshot({ path: `${out}/${name}-3b-notes.png` });
+    await tab.locator('feedback-hub-widget textarea').fill(`Save button does nothing, see #1 (${name})`);
     await tab.locator('feedback-hub-widget button[type=submit]').click();
     await tab
       .locator('feedback-hub-widget .toast', { hasText: 'Thanks' })
@@ -124,8 +129,10 @@ try {
   const list = await (await fetch(`${hub}/api/feedback`, { headers: { authorization: `Bearer ${token}` } })).json();
   if (list.length !== 2) fail(`expected 2 items, got ${list.length}`);
   const item = list[0];
-  if (item.app !== 'demo' || item.screenshot_count !== 1 || item.reporter !== 'Tester') fail(`unexpected item ${JSON.stringify(item)}`);
+  if (item.app !== 'demo' || item.screenshot_count !== 1) fail(`unexpected item ${JSON.stringify(item)}`);
   if (item.context.appVersion !== '1.2.3') fail('app version missing');
+  const detail = await (await fetch(`${hub}/api/feedback/${item.id}`, { headers: { authorization: `Bearer ${token}` } })).json();
+  if (detail.screenshots[0].note !== 'Save does nothing') fail(`screenshot note missing: ${JSON.stringify(detail.screenshots)}`);
   if (!item.page_url?.startsWith('http://localhost:')) fail(`page url missing origin: ${item.page_url}`);
   if (!item.context.logs.some((l) => l.message.includes('Save failed'))) fail('console error not captured');
   if (!item.context.network.some((n) => n.status === '404')) fail('failed request not captured');

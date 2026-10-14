@@ -5,7 +5,9 @@ can pick it up and fix things.
 
 - **Widget** (`web/src/widget.ts`): a small, discreet corner button. It snapshots the
   page, lets the user circle/box/arrow things on one or more screenshots
-  (page snapshot, real screen capture, or an uploaded/pasted image), and sends
+  (page snapshot, real screen capture, or an uploaded/pasted image), numbers them
+  (#1, #2… for referring to them in the text), takes an optional note per
+  screenshot and a text tool for inline labels, and sends
   the report with page URL, device info, recent console errors and failed
   requests.
 - **Server** (`feedback-hub serve`): Rust + SQLite. Anonymous `POST

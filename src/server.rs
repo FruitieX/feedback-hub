@@ -3,7 +3,7 @@
 
 use crate::{
     apps::AppInfo,
-    db::{Database, Event, Feedback, ListFilter, NewFeedback, STATUSES, Screenshot},
+    db::{Database, Event, Feedback, ListFilter, NewFeedback, NewScreenshot, STATUSES, Screenshot},
 };
 use axum::{
     Json, Router,
@@ -218,6 +218,9 @@ struct Submission {
     /// Data URLs (`data:image/png;base64,...`).
     #[serde(default)]
     screenshots: Vec<String>,
+    /// Optional caption per screenshot, by position.
+    #[serde(default)]
+    screenshot_notes: Vec<Option<String>>,
 }
 
 fn default_kind() -> String {
@@ -294,8 +297,13 @@ async fn submit(
     let screenshots = body
         .screenshots
         .iter()
-        .map(|s| decode_image(s))
-        .collect::<std::result::Result<Vec<_>, _>>()
+        .enumerate()
+        .map(|(i, s)| {
+            let (mime, bytes) = decode_image(s)?;
+            let note = clip(body.screenshot_notes.get(i).cloned().flatten(), 1000);
+            Ok(NewScreenshot { mime, bytes, note })
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()
         .map_err(bad_request)?;
     let context = match body.context {
         serde_json::Value::Object(_) => body.context,
@@ -591,7 +599,7 @@ mod tests {
             &router,
             "POST",
             "/api/feedback",
-            json!({"app": "Demo", "message": "Button broken", "screenshots": [shot], "context": {"logs": []}}),
+            json!({"app": "Demo", "message": "Button broken (see #1)", "screenshots": [shot], "screenshotNotes": ["Save does nothing"], "context": {"logs": []}}),
             &[("origin", "https://demo.example.org")],
         )
         .await;
@@ -708,6 +716,7 @@ mod tests {
             ]
         );
         assert_eq!(body["screenshots"][0]["mime"], "image/png");
+        assert_eq!(body["screenshots"][0]["note"], "Save does nothing");
     }
 
     #[tokio::test]
