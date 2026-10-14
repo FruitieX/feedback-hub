@@ -316,16 +316,18 @@ function navigate(changes: Partial<Pick<typeof state, 'view' | 'selected' | 'run
 function renderLogin() {
   app.innerHTML = `
     <main class="login">
-      <form>
+      <form method="post" action="#">
         <h1>Feedback Hub</h1>
         <p>Enter the admin token to view feedback.</p>
+        <!-- Lets password managers treat this as a normal login; only the token is checked. -->
+        <input type="text" name="username" value="admin" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">
         <input type="password" name="token" placeholder="Admin token" autocomplete="current-password" required>
         <button class="primary">Sign in</button>
       </form>
     </main>`;
   app.querySelector('form')!.addEventListener('submit', (event) => {
     event.preventDefault();
-    state.token = (app.querySelector('input') as HTMLInputElement).value.trim();
+    state.token = (app.querySelector('input[name=token]') as HTMLInputElement).value.trim();
     storage?.setItem(TOKEN_KEY, state.token);
     void init();
   });

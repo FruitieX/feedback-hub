@@ -20,6 +20,7 @@ input, select, textarea { background: var(--soft); border: 1px solid var(--line)
 .login form { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px; display: grid; gap: 12px; width: min(360px, 100%); }
 .login h1 { margin: 0; font-size: 20px; }
 .login p { margin: 0; color: var(--muted); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); border: 0; }
 
 .layout { display: grid; grid-template-columns: minmax(300px, 400px) 1fr; grid-template-rows: auto 1fr; height: 100dvh; }
 .top { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
