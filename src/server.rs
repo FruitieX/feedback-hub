@@ -51,15 +51,55 @@ pub struct Server {
     pub workers: Arc<Mutex<BTreeMap<String, WorkerStatus>>>,
     /// Workers asked to re-read their agents' model lists on the next heartbeat.
     pub refresh_models: Arc<Mutex<BTreeSet<String>>>,
+    /// ETag for the static files (widget, triage UI), from their contents.
+    pub static_etag: Option<Arc<str>>,
+}
+
+/// Hashes every file under the static directory. Files served from the Nix
+/// store all have a 1970 mtime, so Last-Modified can't tell builds apart.
+fn static_etag(dir: &std::path::Path) -> Option<Arc<str>> {
+    fn collect(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(&path, files);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    collect(dir, &mut files);
+    if files.is_empty() {
+        return None;
+    }
+    files.sort();
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+    for file in files {
+        digest.update(
+            file.strip_prefix(dir)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .as_bytes(),
+        );
+        digest.update(&std::fs::read(&file).unwrap_or_default());
+    }
+    let hex: String = digest.finish().as_ref()[..12]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Some(format!("\"{hex}\"").into())
 }
 
 impl Server {
     pub fn new(db: Database, config: Config) -> Self {
+        let static_etag = config.static_dir.as_deref().and_then(static_etag);
         Self {
             db,
             config: Arc::new(config),
             workers: Arc::default(),
             refresh_models: Arc::default(),
+            static_etag,
         }
     }
 
@@ -270,23 +310,59 @@ pub fn app(server: Server) -> Router {
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
         ))
-        .layer(middleware::from_fn(cache_headers))
+        .layer(middleware::from_fn_with_state(
+            server.clone(),
+            cache_headers,
+        ))
         // Outermost so preflights for paths shared with admin routes are answered
         // here instead of hitting the token check.
         .layer(cors)
         .with_state(server)
 }
 
-async fn cache_headers(request: Request, next: Next) -> Response {
-    let is_widget = request.uri().path() == "/widget.js";
-    let mut response = next.run(request).await;
+/// Static files are revalidated by content ETag. Apps load the widget
+/// cross-origin and keep it for a few minutes; the triage UI always revalidates.
+async fn cache_headers(State(server): State<Server>, mut request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    let is_widget = path == "/widget.js";
+    let is_static = server.static_etag.is_some()
+        && matches!(*request.method(), Method::GET | Method::HEAD)
+        && !path.starts_with("/api/")
+        && path != "/healthz";
+    if !is_static {
+        return next.run(request).await;
+    }
+    let etag = server.static_etag.clone().expect("checked");
+    // Never answer from the (meaningless) modification time.
+    request.headers_mut().remove(header::IF_MODIFIED_SINCE);
+    let matches = request
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == &*etag || t.trim() == "*"));
+    request.headers_mut().remove(header::IF_NONE_MATCH);
+    let mut response = if matches {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        next.run(request).await
+    };
+    if !(response.status().is_success() || response.status() == StatusCode::NOT_MODIFIED) {
+        return response;
+    }
+    let headers = response.headers_mut();
+    headers.remove(header::LAST_MODIFIED);
+    if let Ok(value) = HeaderValue::from_str(&etag) {
+        headers.insert(header::ETAG, value);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(if is_widget {
+            "public, max-age=300"
+        } else {
+            "no-cache"
+        }),
+    );
     if is_widget {
-        // Apps load the widget cross-origin; keep it fresh so fixes roll out quickly.
-        let headers = response.headers_mut();
-        headers.insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=300"),
-        );
         headers.insert(
             header::ACCESS_CONTROL_ALLOW_ORIGIN,
             HeaderValue::from_static("*"),
@@ -1607,6 +1683,63 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn static_files_revalidate_by_content_not_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let web = tempfile::tempdir().unwrap();
+        std::fs::write(web.path().join("widget.js"), "v1").unwrap();
+        std::fs::write(web.path().join("index.html"), "<html></html>").unwrap();
+        let make = || {
+            app(Server::new(
+                Database::open(dir.path(), "DELETE").unwrap(),
+                Config {
+                    admin_token: "secret".into(),
+                    allowed_origins: vec![],
+                    static_dir: Some(web.path().to_path_buf()),
+                    apps: vec![],
+                },
+            ))
+        };
+        let get = |router: Router, headers: &[(&str, &str)]| {
+            let mut req = Request::get("/widget.js");
+            for (k, v) in headers {
+                req = req.header(*k, *v);
+            }
+            let req = req.body(Body::empty()).unwrap();
+            async move { router.oneshot(req).await.unwrap() }
+        };
+        let res = get(make(), &[]).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(res.headers().get("last-modified").is_none());
+        assert_eq!(res.headers()["cache-control"], "public, max-age=300");
+        let etag = res.headers()["etag"].to_str().unwrap().to_string();
+
+        let res = get(make(), &[("if-none-match", &etag)]).await;
+        assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(res.headers()["access-control-allow-origin"], "*");
+        // Browsers holding a copy from before ETags revalidate by date; they must get the file.
+        let res = get(
+            make(),
+            &[("if-modified-since", "Thu, 01 Jan 1970 00:00:01 GMT")],
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // A new build has a new ETag, so the old one no longer matches.
+        std::fs::write(web.path().join("widget.js"), "v2").unwrap();
+        let res = get(make(), &[("if-none-match", &etag)]).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_ne!(res.headers()["etag"].to_str().unwrap(), etag);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"v2");
+
+        let res = make()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.headers()["cache-control"], "no-cache");
     }
 
     #[tokio::test]
