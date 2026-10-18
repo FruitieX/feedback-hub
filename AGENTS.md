@@ -15,4 +15,4 @@
   API needs the admin token. Don't loosen that.
 - Claude Code may only be driven through the `claude` CLI (subscription use);
   never call the Anthropic API with its login or let other harnesses do so.
-- Deployment lives in `~/homelab/apps/feedback-hub` (private ingress only).
+- Deployment lives in `~/projects/homelab/apps/feedback-hub` (private ingress only).

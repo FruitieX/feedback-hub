@@ -30,4 +30,4 @@ include_open = false             # true = also start agents on new, un-queued fe
 
 # App id → local checkout, when it isn't ~/<app id> or the registry's `checkout`.
 [repos]
-# ferrotune-android = "~/ferrotune"
+# ferrotune-android = "~/projects/ferrotune"
