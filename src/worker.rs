@@ -275,7 +275,7 @@ impl Worker {
             let result = match models::configured(agent, &kind) {
                 Some(fixed) => Ok(fixed),
                 None => match kind.as_str() {
-                    "claude" => models::claude(&program),
+                    "claude" => models::claude(&program, agent),
                     "codex" => models::codex(&program),
                     "hermes" => models::hermes(&home(), &codex_models),
                     _ => Ok(Discovered {
@@ -875,7 +875,10 @@ impl Worker {
                 .take(500)
                 .collect::<String>()
         )?;
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        let agent = self.config.agents().remove(&run.agent).unwrap_or_default();
+        agent.apply_env(kind, &mut command)?;
+        let mut child = command
             .args(args)
             .current_dir(&ws.path)
             .env("PATH", path)

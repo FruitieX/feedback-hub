@@ -20,6 +20,7 @@ include_open = false             # true = also start agents on new, un-queued fe
 # efforts = ["low", "medium", "high"]    # efforts for pinned models
 # args = ["--fallback-model", "sonnet"]  # extra CLI arguments
 # program = "/path/to/claude"
+# oauth_token_file = "~/.config/feedback-hub/claude-token"  # from `claude setup-token`
 #
 # Any other CLI (plain output, no steering). Placeholders:
 # {prompt} {prompt_file} {workdir} {id} {app} {model} {effort}

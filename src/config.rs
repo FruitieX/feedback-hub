@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, process::Command};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ClientConfig {
@@ -62,7 +62,14 @@ pub struct AgentConfig {
     pub efforts: Option<Vec<String>>,
     /// How many runs of this agent may run at once on this worker.
     pub max_parallel: Option<usize>,
+    /// `claude` only: file holding a `claude setup-token` token, passed to the CLI
+    /// as `CLAUDE_CODE_OAUTH_TOKEN`. Without it the worker's runs share the
+    /// interactive login, whose rotating refresh token gets revoked when several
+    /// `claude` processes refresh it at once.
+    pub oauth_token_file: Option<String>,
 }
+
+const CLAUDE_TOKEN_VAR: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
 pub const BUILTIN_AGENTS: &[&str] = &["claude", "codex", "hermes"];
 
@@ -86,6 +93,19 @@ impl AgentConfig {
         self.efforts
             .clone()
             .unwrap_or_else(|| defaults.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// Sets up the environment of this agent's process. The Claude token only
+    /// ever reaches the official `claude` CLI, never another harness.
+    pub fn apply_env(&self, kind: &str, command: &mut Command) -> Result<()> {
+        if kind != "claude" {
+            command.env_remove(CLAUDE_TOKEN_VAR);
+        } else if let Some(file) = &self.oauth_token_file {
+            let token = std::fs::read_to_string(expand_home(file))
+                .with_context(|| format!("reading Claude token file {file}"))?;
+            command.env(CLAUDE_TOKEN_VAR, token.trim());
+        }
+        Ok(())
     }
 }
 
@@ -171,5 +191,42 @@ impl ClientConfig {
             agents.insert(name.clone(), agent.clone());
         }
         agents
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(command: &Command) -> Vec<(String, Option<String>)> {
+        command
+            .get_envs()
+            .map(|(k, v)| {
+                let value = v.map(|v| v.to_string_lossy().into_owned());
+                (k.to_string_lossy().into_owned(), value)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn claude_token_only_reaches_claude() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, "sk-ant-oat01-test\n").unwrap();
+        let agent = AgentConfig {
+            oauth_token_file: Some(file.to_string_lossy().into()),
+            ..Default::default()
+        };
+
+        let mut claude = Command::new("claude");
+        agent.apply_env("claude", &mut claude).unwrap();
+        assert_eq!(
+            env(&claude),
+            [(CLAUDE_TOKEN_VAR.into(), Some("sk-ant-oat01-test".into()))]
+        );
+
+        let mut hermes = Command::new("hermes");
+        agent.apply_env("hermes", &mut hermes).unwrap();
+        assert_eq!(env(&hermes), [(CLAUDE_TOKEN_VAR.into(), None)]);
     }
 }

@@ -120,7 +120,12 @@ agent session there. Claude Code is only ever driven through the official
 `claude` CLI with the local login (no API calls, no token reuse), so it works
 with a subscription. Hermes is refused Claude models and the `anthropic`
 provider, because Hermes calls the API with Claude Code's stored login; keep `max_parallel`/`[agents.claude] max_parallel` modest
-to stay within its usage limits. Any other CLI can be added with
+to stay within its usage limits. Give the worker its own long-lived
+subscription token (`claude setup-token`, saved to a file referenced by
+`[agents.claude] oauth_token_file`): otherwise runs share the interactive login,
+whose rotating refresh token is revoked when several `claude` processes refresh
+it at once ("OAuth session expired and could not be refreshed"). The token is
+passed to `claude` only, never to other agents. Any other CLI can be added with
 `kind = "command"` (plain output, no steering) — see `config.example.toml`.
 
 Feedback text is user input. Agents run with permissions bypassed, so the

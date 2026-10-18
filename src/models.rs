@@ -83,8 +83,9 @@ pub struct Discovered {
     pub models: Vec<ModelInfo>,
 }
 
-pub fn claude(program: &str) -> Result<Discovered> {
+pub fn claude(program: &str, agent: &AgentConfig) -> Result<Discovered> {
     let mut command = Command::new(program);
+    agent.apply_env("claude", &mut command)?;
     command.args([
         "-p",
         "--input-format",
