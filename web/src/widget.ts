@@ -558,11 +558,19 @@ class Widget {
     void annotator.open();
   }
 
-  /** Asks the hub (with its cookie; same site) whether the owner is signed in there. */
+  /**
+   * Asks the hub (with its cookie; same site) whether the owner is signed in there.
+   * Only a "yes" is kept: long-lived pages (installed PWAs) ask again on the next
+   * open after the owner signs in to the hub or a request fails.
+   */
   private owner(): Promise<OwnerSession> {
     this.ownerSession ??= fetch(`${this.hub}/api/widget/session`, { credentials: 'include' })
       .then((r) => (r.ok ? r.json() : { owner: false }))
-      .catch(() => ({ owner: false }));
+      .catch(() => ({ owner: false }))
+      .then((session: OwnerSession) => {
+        if (!session.owner) this.ownerSession = null;
+        return session;
+      });
     return this.ownerSession;
   }
 

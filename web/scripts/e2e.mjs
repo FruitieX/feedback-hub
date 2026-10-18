@@ -272,6 +272,15 @@ try {
   await stranger.waitForTimeout(500);
   if (await stranger.locator('feedback-hub-widget .dispatch').isVisible()) fail('stranger was offered Send & fix');
   await stranger.screenshot({ path: `${out}/widget-stranger.png` });
+
+  // A long-lived page (installed PWA) offers it once the owner signs in to the hub,
+  // on the next open and without a reload.
+  const session = await fetch(`${hub}/api/session`, { method: 'POST', headers: auth, body: '{}' });
+  const [name, value] = session.headers.get('set-cookie').split(';')[0].split('=');
+  await stranger.context().addCookies([{ name, value, url: hub }]);
+  await stranger.locator('feedback-hub-widget .close').click();
+  await stranger.locator('feedback-hub-widget .fab').click();
+  await stranger.locator('feedback-hub-widget .dispatch').waitFor({ state: 'visible' });
   await stranger.close();
   console.log('e2e ok');
 } finally {
