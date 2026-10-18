@@ -46,6 +46,73 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+const changeListeners = new Set<() => void>();
+
+/** Calls `listener` whenever the hub reports a change; returns an unsubscribe function. */
+export function onHubChange(listener: () => void) {
+  changeListeners.add(listener);
+  return () => {
+    changeListeners.delete(listener);
+  };
+}
+
+/**
+ * Follows the hub's change stream (`/api/changes`, server-sent events) and
+ * notifies `onHubChange` listeners, reconnecting with backoff. A stream with no
+ * keep-alive for a while (e.g. after the phone slept) is replaced. Returns a stop function.
+ */
+export function watchChanges(): () => void {
+  let stopped = false;
+  let controller: AbortController | null = null;
+  const notify = () => {
+    for (const listener of changeListeners) listener();
+  };
+  void (async () => {
+    let connected = false;
+    let delay = 1_000;
+    while (!stopped) {
+      controller = new AbortController();
+      const abort = controller.abort.bind(controller);
+      let watchdog = setTimeout(abort, 45_000);
+      try {
+        const response = await fetch('/api/changes', {
+          headers: { authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        });
+        if (response.status === 401) return setToken('');
+        if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+        // Changes may have been missed while disconnected.
+        if (connected) notify();
+        connected = true;
+        delay = 1_000;
+        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+        let buffer = '';
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          clearTimeout(watchdog);
+          watchdog = setTimeout(abort, 45_000);
+          buffer += value;
+          const events = buffer.split('\n\n');
+          buffer = events.pop() ?? '';
+          if (events.some((e) => e.split('\n').includes('event: change'))) notify();
+        }
+      } catch {
+        /* reconnect below */
+      } finally {
+        clearTimeout(watchdog);
+      }
+      if (stopped) return;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      delay = Math.min(delay * 2, 30_000);
+    }
+  })();
+  return () => {
+    stopped = true;
+    controller?.abort();
+  };
+}
+
 export const post = <T>(path: string, body: unknown) => api<T>(path, { method: 'POST', body: JSON.stringify(body) });
 export const patch = <T>(path: string, body: unknown) => api<T>(path, { method: 'PATCH', body: JSON.stringify(body) });
 

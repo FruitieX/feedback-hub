@@ -15,7 +15,10 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event as SseEvent, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use base64::Engine;
@@ -23,9 +26,11 @@ use serde::Deserialize;
 use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
+use tokio::sync::broadcast;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     services::{ServeDir, ServeFile},
@@ -53,6 +58,8 @@ pub struct Server {
     pub refresh_models: Arc<Mutex<BTreeSet<String>>>,
     /// ETag for the static files (widget, triage UI), from their contents.
     pub static_etag: Option<Arc<str>>,
+    /// Ticks after every change, for the triage UI's live updates (`/api/changes`).
+    pub changes: broadcast::Sender<()>,
 }
 
 /// Hashes every file under the static directory. Files served from the Nix
@@ -100,6 +107,7 @@ impl Server {
             workers: Arc::default(),
             refresh_models: Arc::default(),
             static_etag,
+            changes: broadcast::channel(16).0,
         }
     }
 
@@ -286,6 +294,7 @@ pub fn app(server: Server) -> Router {
         .route("/api/worker/heartbeat", post(heartbeat))
         .route("/api/workers", get(list_workers))
         .route("/api/workers/refresh", post(refresh_workers))
+        .route("/api/changes", get(changes))
         .route_layer(middleware::from_fn_with_state(
             server.clone(),
             require_token,
@@ -313,6 +322,10 @@ pub fn app(server: Server) -> Router {
         .layer(middleware::from_fn_with_state(
             server.clone(),
             cache_headers,
+        ))
+        .layer(middleware::from_fn_with_state(
+            server.clone(),
+            announce_changes,
         ))
         // Outermost so preflights for paths shared with admin routes are answered
         // here instead of hitting the token check.
@@ -369,6 +382,42 @@ async fn cache_headers(State(server): State<Server>, mut request: Request, next:
         );
     }
     response
+}
+
+/// Tells open triage UIs that something changed after every successful write,
+/// except the workers' routine polling, which changes nothing they show.
+async fn announce_changes(State(server): State<Server>, request: Request, next: Next) -> Response {
+    let writes = !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    );
+    let path = request.uri().path().to_owned();
+    let response = next.run(request).await;
+    let quiet = matches!(path.as_str(), "/api/worker/heartbeat" | "/api/session")
+        || path.ends_with("/commands/take")
+        || (path.starts_with("/api/worker/claim") && response.status() == StatusCode::NO_CONTENT);
+    if writes && !quiet && path.starts_with("/api/") && response.status().is_success() {
+        // Nobody listening is fine.
+        let _ = server.changes.send(());
+    }
+    response
+}
+
+/// Server-sent events: a `change` event whenever data shown in the triage UI
+/// may have changed; the UI then reloads what it shows.
+async fn changes(
+    State(server): State<Server>,
+) -> Sse<impl futures_util::Stream<Item = std::result::Result<SseEvent, Infallible>>> {
+    let stream = futures_util::stream::unfold(server.changes.subscribe(), |mut rx| async move {
+        match rx.recv().await {
+            // Missed ticks still mean "reload".
+            Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                Some((Ok(SseEvent::default().event("change").data("")), rx))
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -1208,6 +1257,48 @@ mod tests {
     }
 
     const AUTH: (&str, &str) = ("authorization", "Bearer secret");
+
+    #[tokio::test]
+    async fn changes_stream_ticks_after_writes_only() {
+        let (router, _dir) = test_server();
+        let (status, _) = send(&router, "GET", "/api/changes", json!(null), &[]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let req = Request::get("/api/changes")
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        let res = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.headers()["content-type"], "text/event-stream");
+        let mut body = res.into_body();
+        let wait = std::time::Duration::from_millis(300);
+
+        let heartbeat = json!({"name": "w", "agents": [], "running": [], "max_parallel": 1});
+        let (status, _) = send(&router, "POST", "/api/worker/heartbeat", heartbeat, &[AUTH]).await;
+        assert!(status.is_success());
+        assert!(
+            tokio::time::timeout(wait, body.frame()).await.is_err(),
+            "heartbeats are quiet"
+        );
+
+        let submit = json!({"app": "demo", "message": "hi"});
+        let (status, _) = send(
+            &router,
+            "POST",
+            "/api/feedback",
+            submit,
+            &[("origin", "https://demo.example.org")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let frame = tokio::time::timeout(wait, body.frame())
+            .await
+            .expect("a change event")
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap();
+        assert!(text.starts_with("event: change"), "{text}");
+    }
 
     #[test]
     fn origin_patterns() {

@@ -3,6 +3,7 @@
 import { Check, ChevronDown, X } from 'lucide-react';
 import { AlertDialog, Select as RSelect, Toast } from 'radix-ui';
 import { createContext, ReactNode, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { onHubChange } from './api';
 
 // --- Toasts -------------------------------------------------------------------
 
@@ -172,6 +173,33 @@ export function usePoll(fn: () => void, ms: number, deps: unknown[]) {
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
+  // Live updates: reload on hub changes (coalescing bursts, e.g. a streaming
+  // agent) and as soon as the page is visible or online again.
+  useEffect(() => {
+    let pending: ReturnType<typeof setTimeout> | undefined;
+    const visible = () => document.visibilityState === 'visible';
+    const onChange = () => {
+      if (!visible() || pending !== undefined) return;
+      pending = setTimeout(() => {
+        pending = undefined;
+        saved.current();
+      }, 250);
+    };
+    const onResume = () => {
+      if (visible()) saved.current();
+    };
+    const unsubscribe = onHubChange(onChange);
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('online', onResume);
+    window.addEventListener('pageshow', onResume);
+    return () => {
+      unsubscribe();
+      clearTimeout(pending);
+      document.removeEventListener('visibilitychange', onResume);
+      window.removeEventListener('online', onResume);
+      window.removeEventListener('pageshow', onResume);
+    };
+  }, []);
 }
 
 /** Grows a textarea with its content. */

@@ -15,7 +15,10 @@ can pick it up and fix things.
   token. Serves the widget and the triage UI at `/` (React + Radix UI, in
   `web/src/triage/`): browse and edit feedback, tick items and send them to an
   agent with a model and reasoning effort it actually offers, and (under
-  **Agents**) watch runs live, steer, stop or continue them.
+  **Agents**) watch runs live, steer, stop or continue them. Open views update
+  live from `/api/changes` (server-sent events after every write) and reload
+  when the tab is shown again; a proxy in front must not time out that
+  long-lived response.
 - **CLI** (`feedback-hub list|show|comment|status|queue|runs|run|steer|stop|apps|prompt`):
   how humans and agents read and update feedback and runs.
 - **Worker** (`feedback-hub worker`): claims queued runs and executes Claude

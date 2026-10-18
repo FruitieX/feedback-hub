@@ -194,6 +194,13 @@ try {
   await triage.click('.dialog .button.primary');
   await triage.locator('.message', { hasText: '(edited)' }).waitFor();
 
+  // Changes made elsewhere (agents, other devices) show up live, well before the next poll.
+  const edited = (await (await fetch(`${hub}/api/feedback`, { headers: auth })).json()).find((f) =>
+    f.message.includes('(edited)'),
+  );
+  await post(`/api/feedback/${edited.id}/events`, { body: 'Live update check', author: 'e2e', kind: 'comment' });
+  await triage.getByText('Live update check').waitFor({ timeout: 3000 });
+
   // Queue it for Codex with a model and an effort only that model offers.
   await pick(triage, '.queue', 'Agent', 'codex');
   await pick(triage, '.queue', 'Model', 'GPT-6-Sol');

@@ -3,7 +3,7 @@ import { Tabs, Tooltip } from 'radix-ui';
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChoiceContext, WorkersContext, WorkersState } from './AgentPicker';
 import { AgentsView } from './AgentsView';
-import { api, getToken, onTokenChange, post, setToken } from './api';
+import { api, getToken, onTokenChange, post, setToken, watchChanges } from './api';
 import { FeedbackView } from './FeedbackView';
 import { AgentChoice, AppInfo, Run, WorkerStatus } from './types';
 import { ToastProvider, usePoll } from './ui';
@@ -100,6 +100,8 @@ function Signed() {
     void post('/api/session', {}).catch(() => {});
     return () => window.removeEventListener('popstate', onPop);
   }, []);
+  // Views reload on the hub's change events (see usePoll).
+  useEffect(() => watchChanges(), []);
 
   const go = useCallback((next: Partial<Route>) => {
     setRoute((current) => {
