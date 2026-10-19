@@ -210,6 +210,11 @@ class Widget {
     this.host = document.createElement('feedback-hub-widget');
     this.host.style.cssText = 'all: initial; position: fixed; z-index: 2147483600; top: 0; left: 0; width: 0; height: 0;';
     this.root = this.host.attachShadow({ mode: 'open' });
+    // Keys typed into the widget are ours. Host shortcut handlers see the shadow
+    // host as the target, not our text fields, and would swallow letters/Space.
+    for (const type of ['keydown', 'keypress', 'keyup']) {
+      this.host.addEventListener(type, (event) => event.stopPropagation());
+    }
     const style = document.createElement('style');
     style.textContent = WIDGET_CSS;
     this.root.append(style);

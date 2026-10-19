@@ -40,6 +40,8 @@ const page = `<!doctype html><html><head><meta name="viewport" content="width=de
 <body><h1 style="margin:20px">Demo app</h1><button class="broken" onclick="fetch('/missing');console.error('Save failed', new Error('boom'))">Save</button>
 <canvas id="gl" width="200" height="100" style="position:absolute;right:40px;top:40px"></canvas>
 <script>const gl=document.getElementById('gl').getContext('webgl');gl.clearColor(1,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);</script>
+<script>// Player-style shortcuts that skip text fields by event.target, like ferrotune's.
+addEventListener('keydown',(e)=>{if(!/^(INPUT|TEXTAREA)$/.test(e.target.tagName)&&/^[ ns]$/.test(e.key))e.preventDefault()});</script>
 <div class="scroller">${Array.from({ length: 40 }, (_, i) => `<div class="row">Row ${i + 1}</div>`).join('')}</div></body></html>`;
 const appServer = createServer((req, res) => {
   if (req.url === '/') {
@@ -112,7 +114,11 @@ try {
 
     await tab.locator('feedback-hub-widget .shot .note').first().fill('Save does nothing');
     await tab.screenshot({ path: `${out}/${name}-3b-notes.png` });
-    await tab.locator('feedback-hub-widget textarea').fill(`Save button does nothing, see #1 (${name})`);
+    // Typed key by key: the host's shortcuts must not swallow letters or Space.
+    const message = `Save button does nothing, see #1 (${name})`;
+    await tab.locator('feedback-hub-widget textarea').fill('');
+    await tab.locator('feedback-hub-widget textarea').pressSequentially(message);
+    if ((await tab.locator('feedback-hub-widget textarea').inputValue()) !== message) fail('host shortcuts ate typed keys');
     await tab.locator('feedback-hub-widget button[type=submit]').click();
     await tab
       .locator('feedback-hub-widget .toast', { hasText: 'Thanks' })
