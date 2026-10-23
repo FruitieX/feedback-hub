@@ -7,6 +7,7 @@ use crate::{
         Database, Event, Feedback, FeedbackEdit, ListFilter, NewFeedback, NewScreenshot, STATUSES,
         Screenshot,
     },
+    oidc::{self, LoginState, Oidc, Session, Signer},
     runs::{AgentChoice, LAST_CHOICE, NewRun, Run, RunEvent, RunFilter, RunUpdate, WorkerStatus},
 };
 use axum::{
@@ -16,7 +17,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{
-        IntoResponse, Response,
+        AppendHeaders, IntoResponse, Response,
         sse::{Event as SseEvent, KeepAlive, Sse},
     },
     routing::{get, post},
@@ -46,6 +47,8 @@ pub struct Config {
     pub allowed_origins: Vec<String>,
     pub static_dir: Option<PathBuf>,
     pub apps: Vec<AppInfo>,
+    /// Owner sign-in through an OpenID Connect provider, besides the admin token.
+    pub oidc: Option<Oidc>,
 }
 
 #[derive(Clone)]
@@ -60,6 +63,8 @@ pub struct Server {
     pub static_etag: Option<Arc<str>>,
     /// Ticks after every change, for the triage UI's live updates (`/api/changes`).
     pub changes: broadcast::Sender<()>,
+    /// Signs the sign-in cookies.
+    pub signer: Arc<Signer>,
 }
 
 /// Hashes every file under the static directory. Files served from the Nix
@@ -101,7 +106,9 @@ fn static_etag(dir: &std::path::Path) -> Option<Arc<str>> {
 impl Server {
     pub fn new(db: Database, config: Config) -> Self {
         let static_etag = config.static_dir.as_deref().and_then(static_etag);
+        let signer = Arc::new(Signer::new(&config.admin_token));
         Self {
+            signer,
             db,
             config: Arc::new(config),
             workers: Arc::default(),
@@ -266,6 +273,9 @@ pub fn app(server: Server) -> Router {
         .route("/api/apps", get(list_apps))
         .route("/api/widget/session", get(widget_session))
         .route("/api/session", axum::routing::delete(end_session))
+        .route("/api/auth", get(auth_status))
+        .route("/auth/login", get(oidc_login))
+        .route("/auth/callback", get(oidc_callback))
         .layer(DefaultBodyLimit::max(
             MAX_SCREENSHOTS * MAX_SCREENSHOT_BYTES * 4 / 3 + 1024 * 1024,
         ));
@@ -425,19 +435,59 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 async fn require_token(State(server): State<Server>, request: Request, next: Next) -> Response {
-    let provided = request
-        .headers()
+    let headers = request.headers();
+    let provided = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or_default();
-    if server.config.admin_token.is_empty()
-        || !constant_time_eq(provided.as_bytes(), server.config.admin_token.as_bytes())
-    {
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let allowed = match provided {
+        Some(provided) => {
+            !server.config.admin_token.is_empty()
+                && constant_time_eq(provided.as_bytes(), server.config.admin_token.as_bytes())
+        }
+        // The session cookie also reaches us from the owner's other apps
+        // (same site, credentialed CORS for the widget), so only accept it
+        // from the hub's own pages.
+        None => same_origin(headers) && session(&server, headers).is_some(),
+    };
+    if !allowed {
         return ApiError(StatusCode::UNAUTHORIZED, "missing or invalid token".into())
             .into_response();
     }
     next.run(request).await
+}
+
+fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|c| c.trim().split_once('='))
+        .find(|(n, _)| *n == name)
+        .map(|(_, value)| value)
+}
+
+/// The owner signed in through the OpenID Connect provider, if the cookie is valid.
+fn session(server: &Server, headers: &HeaderMap) -> Option<Session> {
+    let session: Session = server
+        .signer
+        .verify(oidc::SESSION_COOKIE, cookie(headers, oidc::SESSION_COOKIE)?)?;
+    (session.exp > oidc::now()).then_some(session)
+}
+
+/// Whether a request comes from the hub's own pages rather than another
+/// (same-site) origin. Browsers send `Sec-Fetch-Site`; `Origin` covers older ones.
+fn same_origin(headers: &HeaderMap) -> bool {
+    let value = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    if let Some(site) = value("sec-fetch-site") {
+        return matches!(site, "same-origin" | "none");
+    }
+    match (value("origin"), value("host")) {
+        (Some(origin), Some(host)) => origin.split_once("://").map(|(_, h)| h) == Some(host),
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
 }
 
 #[derive(Deserialize)]
@@ -617,6 +667,9 @@ fn is_owner(server: &Server, headers: &HeaderMap) -> bool {
     if server.config.admin_token.is_empty() {
         return false;
     }
+    if session(server, headers).is_some() {
+        return true;
+    }
     let expected = owner_session(&server.config.admin_token);
     headers
         .get_all(header::COOKIE)
@@ -651,8 +704,127 @@ async fn start_session(State(server): State<Server>) -> Response {
 }
 
 async fn end_session() -> Response {
-    let cookie = format!("{OWNER_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax");
-    (StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response()
+    let clear = |name: &str| format!("{name}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax");
+    (
+        StatusCode::NO_CONTENT,
+        AppendHeaders([
+            (header::SET_COOKIE, clear(OWNER_COOKIE)),
+            (header::SET_COOKIE, clear(oidc::SESSION_COOKIE)),
+        ]),
+    )
+        .into_response()
+}
+
+/// Tells the triage UI whether provider sign-in is offered and who is signed in with it.
+async fn auth_status(State(server): State<Server>, headers: HeaderMap) -> Json<serde_json::Value> {
+    Json(json!({
+        "oidc": server.config.oidc.is_some(),
+        "user": session(&server, &headers).map(|s| s.name),
+    }))
+}
+
+fn oidc_failed(error: impl std::fmt::Display) -> Response {
+    tracing::warn!("sign-in failed: {error}");
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        "<!doctype html><title>Sign-in failed</title><p>Sign-in failed. <a href=\"/\">Back to Feedback Hub</a></p>",
+    )
+        .into_response()
+}
+
+async fn oidc_login(State(server): State<Server>) -> Response {
+    if server.config.oidc.is_none() {
+        return not_found().into_response();
+    }
+    let started = tokio::task::spawn_blocking({
+        let server = server.clone();
+        move || server.config.oidc.as_ref().expect("checked above").start()
+    })
+    .await;
+    match started {
+        Ok(Ok((url, login))) => {
+            let cookie = format!(
+                "{}={}; Path=/auth; Max-Age={}; HttpOnly; Secure; SameSite=Lax",
+                oidc::STATE_COOKIE,
+                server.signer.sign(oidc::STATE_COOKIE, &login),
+                oidc::STATE_SECONDS
+            );
+            (
+                StatusCode::SEE_OTHER,
+                [(header::LOCATION, url), (header::SET_COOKIE, cookie)],
+            )
+                .into_response()
+        }
+        Ok(Err(e)) => oidc_failed(format!("{e:#}")),
+        Err(e) => oidc_failed(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct CallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+async fn oidc_callback(
+    State(server): State<Server>,
+    headers: HeaderMap,
+    Query(query): Query<CallbackQuery>,
+) -> Response {
+    if server.config.oidc.is_none() {
+        return not_found().into_response();
+    }
+    if let Some(error) = query.error {
+        return oidc_failed(format!("provider returned {error}"));
+    }
+    let login: Option<LoginState> = cookie(&headers, oidc::STATE_COOKIE)
+        .and_then(|c| server.signer.verify(oidc::STATE_COOKIE, c))
+        .filter(|l: &LoginState| l.exp > oidc::now());
+    let (Some(login), Some(code)) = (login, query.code) else {
+        return oidc_failed("missing or expired sign-in state");
+    };
+    if query.state.as_deref() != Some(login.state.as_str()) {
+        return oidc_failed("state does not match");
+    }
+    let finished = tokio::task::spawn_blocking({
+        let server = server.clone();
+        move || {
+            server
+                .config
+                .oidc
+                .as_ref()
+                .expect("checked above")
+                .finish(&login, &code)
+        }
+    })
+    .await;
+    let session = match finished {
+        Ok(Ok(session)) => session,
+        Ok(Err(e)) => return oidc_failed(format!("{e:#}")),
+        Err(e) => return oidc_failed(e),
+    };
+    tracing::info!("{} ({}) signed in", session.name, session.sub);
+    let session_cookie = format!(
+        "{}={}; Path=/; Max-Age={}; HttpOnly; Secure; SameSite=Lax",
+        oidc::SESSION_COOKIE,
+        server.signer.sign(oidc::SESSION_COOKIE, &session),
+        oidc::SESSION_SECONDS
+    );
+    let clear_state = format!(
+        "{}=; Path=/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
+        oidc::STATE_COOKIE
+    );
+    (
+        StatusCode::SEE_OTHER,
+        AppendHeaders([
+            (header::LOCATION, "/".to_string()),
+            (header::SET_COOKIE, session_cookie),
+            (header::SET_COOKIE, clear_state),
+        ]),
+    )
+        .into_response()
 }
 
 /// Tells the widget whether the owner is using it, and which agent "send & fix" uses.
@@ -1224,6 +1396,7 @@ mod tests {
                 allowed_origins: vec!["https://*.example.org".into()],
                 static_dir: None,
                 apps: vec![],
+                oidc: None,
             },
         );
         (app(server), dir)
@@ -1257,6 +1430,120 @@ mod tests {
     }
 
     const AUTH: (&str, &str) = ("authorization", "Bearer secret");
+
+    async fn get_status(router: &Router, headers: &[(&str, &str)]) -> StatusCode {
+        send(router, "GET", "/api/feedback", json!(null), headers)
+            .await
+            .0
+    }
+
+    #[tokio::test]
+    async fn session_cookie_unlocks_admin_api_from_own_pages() {
+        let (router, _dir) = test_server();
+        let signer = Signer::new("secret");
+        let valid = signer.sign(
+            oidc::SESSION_COOKIE,
+            &Session {
+                sub: "u1".into(),
+                name: "Owner".into(),
+                exp: oidc::now() + 60,
+            },
+        );
+        let expired = signer.sign(
+            oidc::SESSION_COOKIE,
+            &Session {
+                sub: "u1".into(),
+                name: "Owner".into(),
+                exp: 1,
+            },
+        );
+        let cookie = |value: &str| format!("{}={value}", oidc::SESSION_COOKIE);
+
+        let valid_cookie = cookie(&valid);
+        assert_eq!(
+            get_status(
+                &router,
+                &[("cookie", &valid_cookie), ("sec-fetch-site", "same-origin")]
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_status(&router, &[("cookie", &valid_cookie)]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_status(
+                &router,
+                &[
+                    ("cookie", &valid_cookie),
+                    ("origin", "https://hub.example.org"),
+                    ("host", "hub.example.org")
+                ]
+            )
+            .await,
+            StatusCode::OK
+        );
+        // Not from another app on the same site, even with the cookie.
+        assert_eq!(
+            get_status(
+                &router,
+                &[("cookie", &valid_cookie), ("sec-fetch-site", "same-site")]
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get_status(
+                &router,
+                &[
+                    ("cookie", &valid_cookie),
+                    ("origin", "https://demo.example.org"),
+                    ("host", "hub.example.org")
+                ]
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get_status(&router, &[("cookie", &cookie(&expired))]).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get_status(&router, &[("cookie", &cookie("forged.value"))]).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // A wrong bearer token is not rescued by the cookie.
+        assert_eq!(
+            get_status(
+                &router,
+                &[("cookie", &valid_cookie), ("authorization", "Bearer nope")]
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let (_, status) = send(
+            &router,
+            "GET",
+            "/api/auth",
+            json!(null),
+            &[("cookie", &valid_cookie)],
+        )
+        .await;
+        assert_eq!(status, json!({"oidc": false, "user": "Owner"}));
+        let (_, widget) = send(
+            &router,
+            "GET",
+            "/api/widget/session",
+            json!(null),
+            &[("cookie", &valid_cookie)],
+        )
+        .await;
+        assert_eq!(widget["owner"], true);
+        let (status, _) = send(&router, "GET", "/auth/login", json!(null), &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "no provider configured");
+    }
 
     #[tokio::test]
     async fn changes_stream_ticks_after_writes_only() {
@@ -1790,6 +2077,7 @@ mod tests {
                     allowed_origins: vec![],
                     static_dir: Some(web.path().to_path_buf()),
                     apps: vec![],
+                    oidc: None,
                 },
             ))
         };

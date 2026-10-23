@@ -1,6 +1,7 @@
 // End-to-end check: a demo "app" on another origin loads the widget, captures
 // and annotates a screenshot, submits it, and the triage UI shows it.
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,6 +16,7 @@ const hub = `http://127.0.0.1:${hubPort}`;
 const out = 'test-results';
 mkdirSync(out, { recursive: true });
 const dataDir = mkdtempSync(join(tmpdir(), 'feedback-hub-e2e-'));
+const oidcDataDir = mkdtempSync(join(tmpdir(), 'feedback-hub-e2e-oidc-'));
 
 const server = spawn(bin, ['serve'], {
   env: {
@@ -43,6 +45,62 @@ const page = `<!doctype html><html><head><meta name="viewport" content="width=de
 <script>// Player-style shortcuts that skip text fields by event.target, like ferrotune's.
 addEventListener('keydown',(e)=>{if(!/^(INPUT|TEXTAREA)$/.test(e.target.tagName)&&/^[ ns]$/.test(e.key))e.preventDefault()});</script>
 <div class="scroller">${Array.from({ length: 40 }, (_, i) => `<div class="row">Row ${i + 1}</div>`).join('')}</div></body></html>`;
+// A minimal OpenID Connect provider for the passkey sign-in flow: it signs in
+// whoever asks, and checks the hub's PKCE verifier and client secret.
+const idpPort = 18433;
+const oidcHubPort = 18434;
+const idp = `http://127.0.0.1:${idpPort}`;
+const oidcHub = `http://127.0.0.1:${oidcHubPort}`;
+const b64url = (value) => Buffer.from(value).toString('base64url');
+const codes = new Map();
+const idpServer = createServer(async (req, res) => {
+  const url = new URL(req.url, idp);
+  const json = (body, status = 200) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
+  if (url.pathname === '/.well-known/openid-configuration') {
+    return json({ issuer: idp, authorization_endpoint: `${idp}/authorize`, token_endpoint: `${idp}/token` });
+  }
+  if (url.pathname === '/authorize') {
+    const code = `code-${codes.size}`;
+    codes.set(code, Object.fromEntries(url.searchParams));
+    const back = new URL(url.searchParams.get('redirect_uri'));
+    back.searchParams.set('code', code);
+    back.searchParams.set('state', url.searchParams.get('state'));
+    return res.writeHead(302, { location: String(back) }).end();
+  }
+  if (url.pathname === '/token' && req.method === 'POST') {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const form = new URLSearchParams(body);
+    const auth = codes.get(form.get('code'));
+    codes.delete(form.get('code'));
+    const challenge = createHash('sha256').update(form.get('code_verifier') ?? '').digest('base64url');
+    if (!auth || challenge !== auth.code_challenge || form.get('client_secret') !== 'idp-secret') {
+      return json({ error: 'invalid_grant' }, 400);
+    }
+    const claims = {
+      iss: idp, sub: 'owner-1', aud: auth.client_id, exp: Math.floor(Date.now() / 1000) + 300,
+      nonce: auth.nonce, name: 'Owner', groups: ['admins'],
+    };
+    return json({ id_token: `${b64url('{"alg":"none"}')}.${b64url(JSON.stringify(claims))}.`, access_token: 'a', token_type: 'Bearer' });
+  }
+  res.writeHead(404).end();
+}).listen(idpPort);
+const oidcServer = spawn(bin, ['serve'], {
+  env: {
+    ...process.env,
+    FEEDBACK_HUB_BIND: `127.0.0.1:${oidcHubPort}`,
+    FEEDBACK_HUB_DATA_DIR: oidcDataDir,
+    FEEDBACK_HUB_STATIC_DIR: resolve('dist'),
+    FEEDBACK_HUB_ADMIN_TOKEN: token,
+    FEEDBACK_HUB_PUBLIC_URL: oidcHub,
+    FEEDBACK_HUB_OIDC_ISSUER: idp,
+    FEEDBACK_HUB_OIDC_CLIENT_ID: 'feedback-hub',
+    FEEDBACK_HUB_OIDC_CLIENT_SECRET: 'idp-secret',
+    FEEDBACK_HUB_OIDC_ALLOWED_GROUPS: 'admins',
+  },
+  stdio: 'inherit',
+});
+
 const appServer = createServer((req, res) => {
   if (req.url === '/') {
     res.writeHead(200, { 'content-type': 'text/html' }).end(page);
@@ -295,10 +353,33 @@ try {
   await stranger.locator('feedback-hub-widget .fab').click();
   await stranger.locator('feedback-hub-widget .dispatch').waitFor({ state: 'visible' });
   await stranger.close();
+
+  // Passkey sign-in through the identity provider; the token form stays as a fallback.
+  const owner = await browser.newPage({ viewport: { width: 420, height: 700 } });
+  await owner.goto(oidcHub);
+  await owner.locator('[data-oidc-login]').waitFor();
+  if (await owner.locator('input[name=token]').isVisible()) fail('token form should be folded away');
+  await owner.screenshot({ path: `${out}/login-oidc.png` });
+  await owner.click('[data-oidc-login]');
+  await owner.locator('[data-logout]').waitFor();
+  await owner.reload();
+  await owner.locator('[data-logout]').waitFor();
+  const me = await owner.evaluate(() => fetch('/api/auth').then((r) => r.json()));
+  if (me.user !== 'Owner') fail(`unexpected session: ${JSON.stringify(me)}`);
+  const feedback = await owner.evaluate(() => fetch('/api/feedback').then((r) => r.status));
+  if (feedback !== 200) fail(`session cookie not accepted: ${feedback}`);
+  await owner.click('[data-logout]');
+  await owner.locator('[data-oidc-login]').waitFor();
+  const after = await owner.evaluate(() => fetch('/api/feedback').then((r) => r.status));
+  if (after !== 401) fail(`still signed in after signing out: ${after}`);
+  await owner.close();
   console.log('e2e ok');
 } finally {
   await browser?.close();
   appServer.close();
+  idpServer.close();
   server.kill();
+  oidcServer.kill();
   rmSync(dataDir, { recursive: true, force: true });
+  rmSync(oidcDataDir, { recursive: true, force: true });
 }

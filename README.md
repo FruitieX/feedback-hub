@@ -112,7 +112,7 @@ if it can't proceed). The UI's instructions field is added to that prompt.
 
 The agent, model and effort last queued from the UI are stored on the hub and
 preselected next time, on every device. Signing in to the triage UI also sets
-an HttpOnly owner cookie (derived from the admin token) on the hub; the widget
+an HttpOnly owner cookie on the hub; the widget
 on the owner's apps (same site, e.g. `*.fruitiex.org`) asks
 `/api/widget/session` with it and then offers **Send & fix**, which submits
 the feedback and queues it for that last-used agent in one go. Other widget
@@ -145,6 +145,16 @@ it that way unless everyone who can reach the widget is trusted.
 | `FEEDBACK_HUB_STATIC_DIR` | — | built `web/dist` |
 | `FEEDBACK_HUB_APPS_FILE` | — | app registry TOML (`[[apps]]` id, name, repo, checkout, hosts, notes) |
 | `FEEDBACK_HUB_SQLITE_JOURNAL_MODE` | `WAL` | use `DELETE` on NFS |
+| `FEEDBACK_HUB_PUBLIC_URL` | — | e.g. `https://feedback.fruitiex.org`; needed for OIDC sign-in |
+| `FEEDBACK_HUB_OIDC_ISSUER` | — | e.g. `https://id.fruitiex.org`; enables "Sign in with passkey" |
+| `FEEDBACK_HUB_OIDC_CLIENT_ID` / `_CLIENT_SECRET` | — | confidential client with callback `<public url>/auth/callback` |
+| `FEEDBACK_HUB_OIDC_ALLOWED_GROUPS` | — | comma-separated; empty allows anyone the provider lets through |
+
+The triage UI signs the owner in with either the admin token or the OpenID
+Connect provider (authorization code + PKCE). Provider sign-in ends in a signed
+30-day `fh_session` cookie that the admin API accepts from the hub's own pages
+only. The CLI and workers keep using the admin token, and rotating the token
+signs every browser out.
 
 ## Development
 

@@ -12,7 +12,9 @@
 - The widget runs inside other apps: keep it self-contained in its shadow root,
   never throw into the host page, and keep the bundle small.
 - `POST /api/feedback` is anonymous (network-gated + origin check); every other
-  API needs the admin token. Don't loosen that.
+  API needs the admin token or the owner's OIDC session cookie (`src/oidc.rs`,
+  Pocket ID at id.fruitiex.org, `admins` group). The cookie is only accepted from
+  the hub's own origin, because other apps on the site share it. Don't loosen that.
 - Claude Code may only be driven through the `claude` CLI (subscription use);
   never call the Anthropic API with its login or let other harnesses do so.
 - Deployment lives in `~/projects/homelab/apps/feedback-hub` (private ingress only).

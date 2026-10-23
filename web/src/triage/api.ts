@@ -1,4 +1,6 @@
-// Admin API client. The token lives in localStorage so the triage UI stays signed in.
+// Admin API client. The owner signs in with the identity provider (an
+// HttpOnly session cookie) or the admin token, which lives in localStorage so
+// the triage UI stays signed in.
 
 const TOKEN_KEY = 'feedbackHub.token';
 
@@ -11,16 +13,35 @@ export const storage = (() => {
 })();
 
 let token = storage?.getItem(TOKEN_KEY) ?? '';
+/** Signed in through the identity provider (the cookie itself is HttpOnly). */
+let session = false;
 const listeners = new Set<() => void>();
 
-export const getToken = () => token;
+export const isSignedIn = () => Boolean(token) || session;
+
+const notifyAuth = () => {
+  for (const listener of listeners) listener();
+};
 
 export function setToken(value: string) {
   token = value;
   if (value) storage?.setItem(TOKEN_KEY, value);
   else storage?.removeItem(TOKEN_KEY);
-  for (const listener of listeners) listener();
+  notifyAuth();
 }
+
+export function setSession(value: boolean) {
+  session = value;
+  notifyAuth();
+}
+
+export function signOut() {
+  session = false;
+  setToken('');
+}
+
+/** The admin token when there is one; otherwise the session cookie goes along by itself. */
+const authHeaders = (): Record<string, string> => (token ? { authorization: `Bearer ${token}` } : {});
 
 export function onTokenChange(listener: () => void) {
   listeners.add(listener);
@@ -32,11 +53,11 @@ export function onTokenChange(listener: () => void) {
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...init.headers },
+    headers: { ...authHeaders(), 'content-type': 'application/json', ...init.headers },
   });
   if (response.status === 401) {
-    setToken('');
-    throw new Error('Signed out: the token was not accepted');
+    signOut();
+    throw new Error('Signed out: sign in again');
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
@@ -76,10 +97,10 @@ export function watchChanges(): () => void {
       let watchdog = setTimeout(abort, 45_000);
       try {
         const response = await fetch('/api/changes', {
-          headers: { authorization: `Bearer ${token}` },
+          headers: authHeaders(),
           signal: controller.signal,
         });
-        if (response.status === 401) return setToken('');
+        if (response.status === 401) return signOut();
         if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
         // Changes may have been missed while disconnected.
         if (connected) notify();
@@ -118,13 +139,13 @@ export const patch = <T>(path: string, body: unknown) => api<T>(path, { method: 
 
 const imageCache = new Map<string, Promise<string>>();
 
-/** Screenshots need the token, so they are fetched and shown as blob URLs. */
+/** Screenshots need authentication, so they are fetched and shown as blob URLs. */
 export function screenshotUrl(id: number, idx: number) {
   const key = `${id}/${idx}`;
   if (!imageCache.has(key)) {
     imageCache.set(
       key,
-      fetch(`/api/feedback/${id}/screenshots/${idx}`, { headers: { authorization: `Bearer ${token}` } })
+      fetch(`/api/feedback/${id}/screenshots/${idx}`, { headers: authHeaders() })
         .then((r) => r.blob())
         .then((b) => URL.createObjectURL(b)),
     );

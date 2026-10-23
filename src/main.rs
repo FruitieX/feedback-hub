@@ -4,6 +4,7 @@ mod client;
 mod config;
 mod db;
 mod models;
+mod oidc;
 mod runs;
 mod server;
 mod worker;
@@ -50,6 +51,19 @@ enum Cmd {
         apps_file: Option<PathBuf>,
         #[arg(long, env = "FEEDBACK_HUB_SQLITE_JOURNAL_MODE", default_value = "WAL")]
         journal_mode: String,
+        /// The hub's public URL, e.g. `https://feedback.example.org` (for sign-in redirects).
+        #[arg(long, env = "FEEDBACK_HUB_PUBLIC_URL")]
+        public_url: Option<String>,
+        /// OpenID Connect issuer for owner sign-in, e.g. `https://id.example.org`.
+        #[arg(long, env = "FEEDBACK_HUB_OIDC_ISSUER")]
+        oidc_issuer: Option<String>,
+        #[arg(long, env = "FEEDBACK_HUB_OIDC_CLIENT_ID")]
+        oidc_client_id: Option<String>,
+        #[arg(long, env = "FEEDBACK_HUB_OIDC_CLIENT_SECRET", hide_env_values = true)]
+        oidc_client_secret: Option<String>,
+        /// Comma-separated groups allowed to sign in (default: whoever the provider lets through).
+        #[arg(long, env = "FEEDBACK_HUB_OIDC_ALLOWED_GROUPS", default_value = "")]
+        oidc_allowed_groups: String,
     },
     /// List feedback (default: everything not yet resolved or dismissed).
     List {
@@ -158,6 +172,11 @@ async fn main() -> Result<()> {
             allowed_origins,
             apps_file,
             journal_mode,
+            public_url,
+            oidc_issuer,
+            oidc_client_id,
+            oidc_client_secret,
+            oidc_allowed_groups,
         } => {
             tracing_subscriber::fmt()
                 .with_env_filter(
@@ -176,6 +195,27 @@ async fn main() -> Result<()> {
                 )?,
                 None => Vec::new(),
             };
+            let oidc = match (oidc_issuer, oidc_client_id) {
+                (Some(issuer), Some(client_id)) => {
+                    let public_url = public_url
+                        .context("FEEDBACK_HUB_PUBLIC_URL is needed for OpenID Connect sign-in")?;
+                    Some(oidc::Oidc::new(oidc::OidcConfig {
+                        issuer,
+                        client_id,
+                        client_secret: oidc_client_secret.unwrap_or_default(),
+                        redirect_url: format!("{}/auth/callback", public_url.trim_end_matches('/')),
+                        allowed_groups: oidc_allowed_groups
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    }))
+                }
+                (None, None) => None,
+                _ => anyhow::bail!(
+                    "set both FEEDBACK_HUB_OIDC_ISSUER and FEEDBACK_HUB_OIDC_CLIENT_ID, or neither"
+                ),
+            };
             let db = db::Database::open(&data_dir, &journal_mode)?;
             let server = server::Server::new(
                 db,
@@ -188,6 +228,7 @@ async fn main() -> Result<()> {
                         .collect(),
                     static_dir,
                     apps,
+                    oidc,
                 },
             );
             let listener = tokio::net::TcpListener::bind(&bind).await?;
