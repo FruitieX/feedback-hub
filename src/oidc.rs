@@ -13,7 +13,9 @@ use std::{
 
 pub const SESSION_COOKIE: &str = "fh_session";
 pub const STATE_COOKIE: &str = "fh_oidc";
-pub const SESSION_SECONDS: u64 = 30 * 24 * 3600;
+/// Sessions slide: each use more than a day after issue renews them.
+pub const SESSION_SECONDS: u64 = 365 * 24 * 3600;
+pub const SESSION_RENEW_AFTER: u64 = 24 * 3600;
 pub const STATE_SECONDS: u64 = 600;
 
 pub struct OidcConfig {

@@ -152,7 +152,7 @@ it that way unless everyone who can reach the widget is trusted.
 
 The triage UI signs the owner in with either the admin token or the OpenID
 Connect provider (authorization code + PKCE). Provider sign-in ends in a signed
-30-day `fh_session` cookie that the admin API accepts from the hub's own pages
+365-day `fh_session` cookie (renewed on use) that the admin API accepts from the hub's own pages
 only. The CLI and workers keep using the admin token, and rotating the token
 signs every browser out.
 

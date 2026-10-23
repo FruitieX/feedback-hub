@@ -440,6 +440,7 @@ async fn require_token(State(server): State<Server>, request: Request, next: Nex
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
+    let mut renewed = None;
     let allowed = match provided {
         Some(provided) => {
             !server.config.admin_token.is_empty()
@@ -448,13 +449,43 @@ async fn require_token(State(server): State<Server>, request: Request, next: Nex
         // The session cookie also reaches us from the owner's other apps
         // (same site, credentialed CORS for the widget), so only accept it
         // from the hub's own pages.
-        None => same_origin(headers) && session(&server, headers).is_some(),
+        None => match same_origin(headers)
+            .then(|| session(&server, headers))
+            .flatten()
+        {
+            Some(session) => {
+                if session.exp < oidc::now() + oidc::SESSION_SECONDS - oidc::SESSION_RENEW_AFTER {
+                    renewed = Some(session_cookie(
+                        &server,
+                        &Session {
+                            exp: oidc::now() + oidc::SESSION_SECONDS,
+                            ..session
+                        },
+                    ));
+                }
+                true
+            }
+            None => false,
+        },
     };
     if !allowed {
         return ApiError(StatusCode::UNAUTHORIZED, "missing or invalid token".into())
             .into_response();
     }
-    next.run(request).await
+    let mut response = next.run(request).await;
+    if let Some(cookie) = renewed.and_then(|c| HeaderValue::from_str(&c).ok()) {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
+    response
+}
+
+fn session_cookie(server: &Server, session: &Session) -> String {
+    format!(
+        "{}={}; Path=/; Max-Age={}; HttpOnly; Secure; SameSite=Lax",
+        oidc::SESSION_COOKIE,
+        server.signer.sign(oidc::SESSION_COOKIE, session),
+        oidc::SESSION_SECONDS
+    )
 }
 
 fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -806,12 +837,7 @@ async fn oidc_callback(
         Err(e) => return oidc_failed(e),
     };
     tracing::info!("{} ({}) signed in", session.name, session.sub);
-    let session_cookie = format!(
-        "{}={}; Path=/; Max-Age={}; HttpOnly; Secure; SameSite=Lax",
-        oidc::SESSION_COOKIE,
-        server.signer.sign(oidc::SESSION_COOKIE, &session),
-        oidc::SESSION_SECONDS
-    );
+    let session_cookie = session_cookie(&server, &session);
     let clear_state = format!(
         "{}=; Path=/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
         oidc::STATE_COOKIE
@@ -1435,6 +1461,44 @@ mod tests {
         send(router, "GET", "/api/feedback", json!(null), headers)
             .await
             .0
+    }
+
+    #[tokio::test]
+    async fn session_cookie_slides_after_a_day() {
+        let (router, _dir) = test_server();
+        let signer = Signer::new("secret");
+        let renews = |exp: u64| {
+            let cookie = format!(
+                "{}={}",
+                oidc::SESSION_COOKIE,
+                signer.sign(
+                    oidc::SESSION_COOKIE,
+                    &Session {
+                        sub: "u1".into(),
+                        name: "Owner".into(),
+                        exp
+                    }
+                )
+            );
+            let router = router.clone();
+            async move {
+                let req = Request::get("/api/feedback")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap();
+                let res = router.oneshot(req).await.unwrap();
+                assert_eq!(res.status(), StatusCode::OK);
+                res.headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .any(|v| v.to_str().unwrap().starts_with("fh_session="))
+            }
+        };
+        assert!(renews(oidc::now() + 60).await, "an old session is renewed");
+        assert!(
+            !renews(oidc::now() + oidc::SESSION_SECONDS).await,
+            "a fresh one is left alone"
+        );
     }
 
     #[tokio::test]
