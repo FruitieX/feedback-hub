@@ -9,8 +9,8 @@
       web = pkgs.buildNpmPackage {
         pname = "feedback-hub-web"; version = "0.1.0";
         src = pkgs.lib.cleanSourceWith { src = ./web; filter = path: type: !(builtins.elem (baseNameOf path) [ "node_modules" "dist" ]); };
-        nodejs = pkgs.nodejs_22;
-        npmDepsHash = "sha256-Q2thJPZYyVxTyHfA5V9ddJ/gDNZJRm/9nH2x5IKPLYY=";
+        nodejs = pkgs.nodejs_26;
+        npmDepsHash = "sha256-TopHIjNy9WePjVx0zkxfIqqGu4ulKgE/6vf94+bgX5Q=";
         env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
         installPhase = ''mkdir -p $out/share/feedback-hub; cp -r dist/. $out/share/feedback-hub/'';
       };
@@ -41,7 +41,7 @@
     });
     devShells = eachSystem (system: let pkgs = (forSystem system).pkgs; in {
       default = pkgs.mkShell {
-        packages = with pkgs; [ nodejs_22 cargo rustc rustfmt clippy gcc git ]
+        packages = with pkgs; [ nodejs_26 cargo rustc rustfmt clippy gcc git ]
           ++ lib.optionals stdenv.hostPlatform.isLinux [ chromium ];
         shellHook = nixpkgs.lib.optionalString (nixpkgs.lib.hasSuffix "linux" system) ''
           export PLAYWRIGHT_CHROMIUM_EXECUTABLE=${pkgs.chromium}/bin/chromium
