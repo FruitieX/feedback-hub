@@ -1,5 +1,5 @@
 # ~/.config/feedback-hub/config.toml — used by the CLI and `feedback-hub worker`.
-url = "https://feedback.example.com"
+url = "https://feedback.fruitiex.org"
 token_file = "~/.config/feedback-hub/token"   # or: token = "..."
 
 [worker]
