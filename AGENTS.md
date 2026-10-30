@@ -4,7 +4,8 @@
 - Before committing run: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
   `cargo test`, and in `web/`: `npm run typecheck && npm run build`, then
   `cargo build && (cd web && npm run e2e)` for widget/triage UI changes. Look at the
-  screenshots in `web/test-results/` when changing UI.
+  screenshots in `web/test-results/` when changing UI. CI also smoke-tests the image:
+  `nix build .#container --out-link result-container && docker load -i result-container && scripts/smoke-container.sh`.
 - If `web/package-lock.json` changes, update `npmDepsHash` in `flake.nix`
   (`nix build .#web` prints the expected hash).
 - The triage UI (`web/src/triage/`) is React + Radix UI primitives styled in
