@@ -6,8 +6,8 @@
   `cargo build && (cd web && npm run e2e)` for widget/triage UI changes. Look at the
   screenshots in `web/test-results/` when changing UI. CI also smoke-tests the image:
   `nix build .#container --out-link result-container && docker load -i result-container && scripts/smoke-container.sh`.
-- If `web/package-lock.json` changes, update `npmDepsHash` in `flake.nix`
-  (`nix build .#web` prints the expected hash).
+- The Nix build reads npm dependencies straight from `web/package-lock.json`
+  (`importNpmLock`), so lockfile updates need no hash changes in `flake.nix`.
 - The triage UI (`web/src/triage/`) is React + Radix UI primitives styled in
   `web/static/app.css`. The widget (`web/src/widget.ts`) stays dependency-free.
 - The widget runs inside other apps: keep it self-contained in its shadow root,
