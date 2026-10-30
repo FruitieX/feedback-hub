@@ -1,9 +1,9 @@
 # ~/.config/feedback-hub/config.toml — used by the CLI and `feedback-hub worker`.
-url = "https://feedback.fruitiex.org"
+url = "https://feedback.example.com"
 token_file = "~/.config/feedback-hub/token"   # or: token = "..."
 
 [worker]
-# name = "honeydew"              # defaults to the hostname
+# name = "workstation"           # defaults to the hostname
 default_agent = "claude"         # used when an item was queued without an agent
 # agents = ["claude", "codex"]   # agents this machine runs (default: all configured)
 poll_seconds = 10

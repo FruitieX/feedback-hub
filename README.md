@@ -34,8 +34,8 @@ app page ──(gateway injects <script src=…/widget.js>)──▶ widget ─�
 
 ## Adding the widget to an app
 
-Web apps don't need code changes. In the homelab, the Envoy gateway injects
-the widget into HTML pages of opted-in routes, only for LAN/VPN clients — see
+Web apps don't need code changes. In the homelab, the gateway injects
+the widget into HTML pages of opted-in routes, only for internal clients — see
 `apps/feedback-hub/widget-injection.*` in the homelab repo. To opt an app in,
 add an `EnvoyExtensionPolicy` for its HTTPRoute there and an entry to the app
 registry (`apps.toml`).
@@ -43,7 +43,7 @@ registry (`apps.toml`).
 Anywhere else, include the script directly:
 
 ```html
-<script async src="https://feedback.fruitiex.org/widget.js" data-app="myapp"></script>
+<script async src="https://feedback.example.com/widget.js" data-app="myapp"></script>
 ```
 
 Optional attributes: `data-position="left"` (bottom-left corner),
@@ -140,12 +140,12 @@ it that way unless everyone who can reach the widget is trusted.
 | Variable | Default | |
 |---|---|---|
 | `FEEDBACK_HUB_ADMIN_TOKEN` | — | required, ≥16 chars |
-| `FEEDBACK_HUB_ALLOWED_ORIGINS` | `http://localhost:*` | comma-separated, e.g. `https://*.fruitiex.org` |
+| `FEEDBACK_HUB_ALLOWED_ORIGINS` | `http://localhost:*` | comma-separated, e.g. `https://*.example.com` |
 | `FEEDBACK_HUB_DATA_DIR` | `./data` | SQLite DB + screenshot files |
 | `FEEDBACK_HUB_STATIC_DIR` | — | built `web/dist` |
 | `FEEDBACK_HUB_APPS_FILE` | — | app registry TOML (`[[apps]]` id, name, repo, checkout, hosts, notes) |
 | `FEEDBACK_HUB_SQLITE_JOURNAL_MODE` | `WAL` | use `DELETE` on NFS |
-| `FEEDBACK_HUB_PUBLIC_URL` | — | e.g. `https://feedback.fruitiex.org`; needed for OIDC sign-in |
+| `FEEDBACK_HUB_PUBLIC_URL` | — | e.g. `https://feedback.example.com`; needed for OIDC sign-in |
 | `FEEDBACK_HUB_OIDC_ISSUER` | — | e.g. `https://id.fruitiex.org`; enables "Sign in with passkey" |
 | `FEEDBACK_HUB_OIDC_CLIENT_ID` / `_CLIENT_SECRET` | — | confidential client with callback `<public url>/auth/callback` |
 | `FEEDBACK_HUB_OIDC_ALLOWED_GROUPS` | — | comma-separated; empty allows anyone the provider lets through |

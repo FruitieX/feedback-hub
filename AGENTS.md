@@ -18,4 +18,4 @@
   the hub's own origin, because other apps on the site share it. Don't loosen that.
 - Claude Code may only be driven through the `claude` CLI (subscription use);
   never call the Anthropic API with its login or let other harnesses do so.
-- Deployment lives in `~/projects/homelab/apps/feedback-hub` (private ingress only).
+- Deployment lives in the FruitieX/homelab repo, `apps/feedback-hub` (private ingress only).
