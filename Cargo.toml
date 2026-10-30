@@ -6,24 +6,24 @@ license = "MIT"
 publish = false
 
 [dependencies]
-anyhow = "1"
-axum = "0.8"
-base64 = "0.23"
-chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive", "env"] }
-futures-util = { version = "0.3", default-features = false }
-ring = "0.17"
-rusqlite = { version = "0.41", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "fs", "sync", "time", "process"] }
-toml = "1.1"
-tower-http = { version = "0.7", features = ["fs", "trace", "limit", "cors", "set-header"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-ureq = { version = "3", features = ["json"] }
+anyhow = "=1.0.104"
+axum = "=0.8.9"
+base64 = "=0.23.1"
+chrono = { version = "=0.4.45", features = ["serde"] }
+clap = { version = "=4.6.7", features = ["derive", "env"] }
+futures-util = { version = "=0.3.34", default-features = false }
+ring = "=0.17.14"
+rusqlite = { version = "=0.41.1", features = ["bundled"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "net", "signal", "fs", "sync", "time", "process"] }
+toml = "=1.1.8+spec-1.1.0"
+tower-http = { version = "=0.7.1", features = ["fs", "trace", "limit", "cors", "set-header"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+ureq = { version = "=3.5.0", features = ["json"] }
 
 [dev-dependencies]
-http-body-util = "0.1"
-tempfile = "3"
-tower = { version = "0.5", features = ["util"] }
+http-body-util = "=0.1.5"
+tempfile = "=3.27.0"
+tower = { version = "=0.5.3", features = ["util"] }
