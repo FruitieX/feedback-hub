@@ -128,3 +128,7 @@ docker load -i result-container && scripts/smoke-container.sh
 The triage UI is React with Radix UI primitives (`web/src/triage/`). The widget
 (`web/src/widget.ts`) has no dependencies and lives in a shadow root so it
 can't break the page it runs on.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
