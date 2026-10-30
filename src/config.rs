@@ -209,6 +209,17 @@ mod tests {
     }
 
     #[test]
+    fn example_config_parses() {
+        let config: ClientConfig = toml::from_str(include_str!("../config.example.toml")).unwrap();
+        assert_eq!(config.url.as_deref(), Some("https://feedback.fruitiex.org"));
+        assert_eq!(config.worker.default_agent.as_deref(), Some("claude"));
+        assert_eq!(config.worker.poll_seconds, Some(10));
+        assert_eq!(config.worker.max_parallel, Some(2));
+        assert_eq!(config.worker.delivery.as_deref(), Some("push"));
+        assert!(!config.worker.include_open);
+    }
+
+    #[test]
     fn claude_token_only_reaches_claude() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("token");

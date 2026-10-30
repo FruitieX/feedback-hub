@@ -7,17 +7,17 @@ publish = false
 [dependencies]
 anyhow = "1"
 axum = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false }
 ring = "0.17"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "fs", "sync", "time", "process"] }
-toml = "0.9"
-tower-http = { version = "0.6", features = ["fs", "trace", "limit", "cors", "set-header"] }
+toml = "1.1"
+tower-http = { version = "0.7", features = ["fs", "trace", "limit", "cors", "set-header"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq = { version = "3", features = ["json"] }
