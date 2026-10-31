@@ -9,17 +9,17 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
     concurrency:
       group: feedback-hub-${{ github.ref }}
       cancel-in-progress: true
     permissions:
       contents: read
       packages: write
-    env:
-      HAS_DISPATCH_TOKEN: ${{ secrets.HOMELAB_DISPATCH_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
@@ -28,7 +28,7 @@ jobs:
       - run: nix develop --command cargo test
       - run: nix develop --command bash -c 'cd web && npm ci && npm run typecheck && npm run build'
       - run: nix develop --command bash -c 'cargo build && cd web && npm run e2e'
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: browser-results
@@ -48,14 +48,47 @@ jobs:
           docker tag ghcr.io/fruitiex/feedback-hub:main ghcr.io/fruitiex/feedback-hub:${{ github.sha }}
           docker push ghcr.io/fruitiex/feedback-hub:main
           docker push ghcr.io/fruitiex/feedback-hub:${{ github.sha }}
-          digest=$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/fruitiex/feedback-hub:main | cut -d@ -f2)
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-      - name: Deploy to homelab
-        if: steps.publish.outputs.digest != '' && env.HAS_DISPATCH_TOKEN == 'true'
+          reference="$(docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/fruitiex/feedback-hub:${{ github.sha }})"
+          digest="${reference##*@}"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.digest != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      HOMELAB_DISPATCH_TOKEN: ${{ secrets.HOMELAB_DISPATCH_TOKEN }}
+    steps:
+      - name: Check deployment configuration and source revision
+        id: deployment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ -z "$HOMELAB_DISPATCH_TOKEN" ]]; then
+            echo '::warning::Auto deployment is disabled until HOMELAB_DISPATCH_TOKEN is added to this repository.'
+            printf 'enabled=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          head="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [[ "$head" != "$GITHUB_SHA" ]]; then
+            echo 'A newer main commit exists; skipping deployment of this older build.'
+            printf 'enabled=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf 'enabled=true\n' >> "$GITHUB_OUTPUT"
+      - name: Deploy tested image to homelab
+        if: steps.deployment.outputs.enabled == 'true'
         uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
         with:
           token: ${{ secrets.HOMELAB_DISPATCH_TOKEN }}
           repository: FruitieX/homelab
           event-type: image-update
           client-payload: |
-            {"image": "ghcr.io/fruitiex/feedback-hub", "digest": "${{ steps.publish.outputs.digest }}"}
+            {
+              "image": "ghcr.io/fruitiex/feedback-hub",
+              "digest": "${{ needs.build.outputs.digest }}",
+              "revision": "${{ github.sha }}"
+            }
