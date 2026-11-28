@@ -10,7 +10,7 @@
     "e2e": "node scripts/e2e.mjs"
   },
   "devDependencies": {
-    "@types/react": "19.3.0",
+    "@types/react": "19.3.1",
     "@types/react-dom": "19.3.0",
     "esbuild": "0.28.2",
     "modern-screenshot": "4.7.0",
